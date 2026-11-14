@@ -1,7 +1,9 @@
 extends Node2D
 ## BOUNCE BACK — hold to charge, release to launch the ball toward the cursor.
 ## Fast impacts shatter balls, slow ones bounce off. The camera follows the ball
-## through a world several screens wide. Everything is drawn in code.
+## through a world several screens wide. Gravity pulls the ball down, and the
+## molten floor along the bottom of the world ends the run on contact.
+## Everything is drawn in code.
 ##
 ## Tuning lives at the top of this file. Nothing else is required to run the game.
 
@@ -28,10 +30,13 @@ const TIME_PER_KILL := 2.4       # seconds added per ball broken
 const TIME_CAP := 48.0           # clock can never exceed this
 
 const GRAVITY := 1000.0          # downward pull on the ball (px/s²)
+const LAVA_H := 120.0            # depth of the molten floor at the bottom
 const WALL_REST := 0.97          # energy kept when bouncing off a wall
 const BUMPER_REST := 1.06        # bumpers add a little energy (pinball feel)
 const SPEED_RETAIN := 0.87       # fraction of speed kept each second
 const MAX_SPEED := 2300.0
+const RICOCHET_LIFT := 480.0     # upward kick each time a ball shatters
+const SPIKE_LEN := 14.0          # how far the spiked balls' points poke out
 const MIN_POWER := 470.0         # launch speed of a tap
 const MAX_POWER := 1750.0        # launch speed of a full charge
 const CHARGE_TIME := 0.8         # seconds to reach full charge
@@ -42,6 +47,9 @@ const KILL_SPEED := 240.0        # minimum impact speed for basic targets
 const BG := Color(0.018, 0.026, 0.052)
 const CYAN := Color(0.43, 0.90, 1.0)
 const WHITE := Color(0.92, 1.0, 1.0)
+# Emissive versions above 1.0 — these are what the glow pass blooms.
+const CYAN_HOT := Color(0.55, 1.65, 2.05)
+const WHITE_HOT := Color(2.20, 2.45, 2.60)
 const PINK := Color(1.0, 0.30, 0.55)
 const GOLD := Color(1.0, 0.77, 0.30)
 const PURPLE := Color(0.65, 0.55, 0.98)
@@ -76,6 +84,8 @@ class Particle:
 	var max_life: float
 	var size: float
 	var color: Color
+	var drag: float = 0.02      # speed kept per second
+	var gy: float = 0.0         # extra vertical drift (negative = rising)
 
 class FloatText:
 	var pos: Vector2
@@ -87,6 +97,8 @@ class FloatText:
 
 # ------------------------------------------------------------------ state
 var mode: String = "title"          # title | play | over
+var died_in_lava: bool = false
+var died_on_spikes: bool = false
 var kills: int = 0
 var score: int = 0
 var best: int = 0
@@ -102,6 +114,12 @@ var banner_t: float = 0.0
 var muted: bool = false
 var t: float = 0.0
 
+# post fx
+var bloom_level: float = 0.35
+var vignette_t: float = 0.2
+var glow_env: Environment
+var vignette_tex: ImageTexture
+
 var cam: Vector2 = Vector2.ZERO        # world point shown at screen center
 var cam_snap: bool = true
 var stream_t: float = 0.0
@@ -113,6 +131,8 @@ var trail: Array = []
 
 var charging: bool = false
 var charge_t: float = 0.0
+var shot_ready: bool = true       # only one launch per ball hit
+var ready_nudge_t: float = 0.0
 var mouse_pos: Vector2 = Vector2.ZERO
 var mouse_seen: bool = false
 
@@ -120,6 +140,9 @@ var bumpers: Array = []
 var targets: Array = []
 var particles: Array = []
 var popups: Array = []
+var mote_t: float = 0.0
+var charge_mote_t: float = 0.0
+var ember_t: float = 0.0
 
 var body_font: Font
 var bold_font: Font
@@ -134,6 +157,7 @@ func _ready() -> void:
 	randomize()
 	_setup_fonts()
 	_setup_audio()
+	_setup_post_fx()
 	_load_best()
 	_enter_title()
 
@@ -144,6 +168,82 @@ func _setup_fonts() -> void:
 	bv.base_font = body_font
 	bv.variation_embolden = 0.75
 	bold_font = bv
+
+
+## Engine bloom: a glow-enabled environment over the 2D canvas. Colours above
+## 1.0 in the palette bleed light, and the intensity is driven below.
+func _setup_post_fx() -> void:
+	var env := Environment.new()
+	env.background_mode = Environment.BG_CANVAS
+	env.glow_enabled = true
+	env.glow_intensity = bloom_level
+	env.glow_strength = 1.0
+	env.glow_bloom = 0.12
+	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
+	env.glow_hdr_threshold = 0.90
+	env.glow_hdr_scale = 2.0
+	var we := WorldEnvironment.new()
+	we.environment = env
+	add_child(we)
+	glow_env = env
+	vignette_tex = _make_vignette()
+
+
+## Soft overlay texture: clear in the middle, opaque toward the corners.
+func _make_vignette() -> ImageTexture:
+	var w := 96
+	var h := 54
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	var c := Vector2(float(w), float(h)) * 0.5
+	var norm := 1.0 / sqrt(2.0)
+	for y in h:
+		for x in w:
+			var d := ((Vector2(float(x) + 0.5, float(y) + 0.5) - c) / c).length() * norm
+			var a := pow(clampf((d - 0.16) / 0.84, 0.0, 1.0), 1.45)
+			img.set_pixel(x, y, Color(1.0, 1.0, 1.0, a))
+	return ImageTexture.create_from_image(img)
+
+
+## 0 when calm, 1 when the ball is near the lava or the clock is nearly out.
+func _danger_level() -> float:
+	if mode == "over":
+		return 1.0
+	if mode != "play":
+		return 0.2
+	var near_lava := clampf((ball_pos.y - (_lava_top() - 760.0)) / 760.0, 0.0, 1.0)
+	var low_time := 1.0 - clampf(time_left / START_TIME, 0.0, 1.0)
+	return clampf(maxf(near_lava, low_time * 0.85), 0.0, 1.0)
+
+
+## Bloom swells while charging, while chaining, and while in danger; the
+## vignette closes in with the same danger and flares red at the edges.
+func _update_post_fx(dt: float) -> void:
+	var danger := _danger_level()
+	if glow_env != null:
+		var target := 0.35
+		if mode == "play":
+			target += 0.45 * (clampf(charge_t / CHARGE_TIME, 0.0, 1.0) if charging else 0.0)
+			target += 0.04 * minf(combo, 8)
+			target += 0.30 * danger
+		elif mode == "title":
+			target = 0.42 + 0.10 * sin(t * 1.7)
+		bloom_level = lerpf(bloom_level, clampf(target, 0.15, 1.5), 1.0 - exp(-6.0 * dt))
+		glow_env.glow_intensity = bloom_level
+		glow_env.glow_bloom = 0.08 + bloom_level * 0.10
+		glow_env.glow_strength = 0.85 + bloom_level * 0.5
+	vignette_t = lerpf(vignette_t, danger, 1.0 - exp(-5.0 * dt))
+
+
+func _draw_vignette() -> void:
+	if vignette_tex == null:
+		return
+	var charge := clampf(charge_t / CHARGE_TIME, 0.0, 1.0) if charging else 0.0
+	# Play runs a heavier frame than the menus so the darkening reads in game.
+	var base := 0.56 if mode == "play" else 0.38
+	var strength := base + 0.32 * vignette_t + 0.08 * charge
+	var tint := Color(0.0, 0.0, 0.02).lerp(Color(0.34, 0.03, 0.05), vignette_t)
+	draw_texture_rect(vignette_tex, Rect2(Vector2.ZERO, VIEW), false,
+		Color(tint.r, tint.g, tint.b, clampf(strength, 0.0, 0.95)))
 
 
 func _setup_audio() -> void:
@@ -268,6 +368,8 @@ func _notification(what: int) -> void:
 # ------------------------------------------------------------------ flow
 func _enter_title() -> void:
 	mode = "title"
+	shot_ready = true
+	ready_nudge_t = 0.0
 	ball_pos = WORLD.get_center()
 	ball_vel = Vector2.RIGHT.rotated(randf() * TAU) * 300.0
 	ball_flash = 0.0
@@ -298,6 +400,10 @@ func _enter_title() -> void:
 
 func _start_game() -> void:
 	mode = "play"
+	died_in_lava = false
+	died_on_spikes = false
+	shot_ready = true
+	ready_nudge_t = 0.0
 	kills = 0
 	score = 0
 	new_best = false
@@ -332,6 +438,8 @@ func _game_over() -> void:
 		best = score
 		new_best = true
 		_save_best()
+	bloom_level = maxf(bloom_level, 1.4)
+	_ring(ball_pos, PINK, 18, 320.0)
 	shake = 14.0
 	_sfx("over", 0.0, -4.0)
 
@@ -344,6 +452,13 @@ func _banner(text: String) -> void:
 # ------------------------------------------------------------------ shooting
 func _begin_charge() -> void:
 	if mode != "play" or charging:
+		return
+	# The launch is spent until the ball hits another ball.
+	if not shot_ready:
+		if ready_nudge_t <= 0.0:
+			ready_nudge_t = 0.6
+			_popup(ball_pos + Vector2(0.0, -BALL_R - 22.0), "HIT A BALL", RED, 16)
+			_sfx("armor", 0.1, -16.0)
 		return
 	charging = true
 	charge_t = 0.0
@@ -368,8 +483,11 @@ func _fire() -> void:
 	if dir.length() < 1.0:
 		dir = Vector2.RIGHT
 	ball_vel = dir.normalized() * power
+	shot_ready = false
 	trail.clear()
 	_burst(ball_pos, CYAN, 14, 240.0)
+	_ring(ball_pos, CYAN, 12, 260.0)
+	_shards(ball_pos, -ball_vel, CYAN, 9, 340.0, 0.45)
 	shake = maxf(shake, 5.0)
 	_sfx("shoot_low" if p < 0.5 else "shoot_high", 0.06, -6.0)
 	charge_t = 0.0
@@ -416,17 +534,19 @@ func _populate_world() -> void:
 	bumpers.clear()
 
 	var guard := 0
-	while bumpers.size() < BUMPER_POP and guard < 4000:
+	while bumpers.size() < BUMPER_POP and guard < 800:
 		guard += 1
 		var br := randf_range(24.0, 46.0)
 		var bp := Vector2(
 			randf_range(WORLD.position.x + 120.0 + br, WORLD.end.x - 120.0 - br),
-			randf_range(WORLD.position.y + 120.0 + br, WORLD.end.y - 120.0 - br))
-		if bp.distance_to(ball_pos) < br + BALL_R + 220.0:
+			randf_range(WORLD.position.y + 120.0 + br, _lava_top() - 120.0 - br))
+		var ball_gap := br + BALL_R + 220.0
+		if bp.distance_squared_to(ball_pos) < ball_gap * ball_gap:
 			continue
 		var free := true
 		for b in bumpers:
-			if bp.distance_to(b.pos) < b.radius + br + 150.0:
+			var gap: float = b.radius + br + 150.0
+			if bp.distance_squared_to(b.pos) < gap * gap:
 				free = false
 				break
 		if free:
@@ -449,7 +569,9 @@ func _populate_world() -> void:
 
 ## World rectangle in which balls are allowed to spawn while streaming.
 func _stream_area() -> Rect2:
-	return _view_rect().grow(STREAM_MARGIN).intersection(WORLD.grow(-70.0))
+	# Spawns stay above the lava so every ball is actually reachable.
+	var dry := Rect2(WORLD.position, Vector2(WORLD.size.x, WORLD.size.y - LAVA_H))
+	return _view_rect().grow(STREAM_MARGIN).intersection(dry.grow(-70.0))
 
 
 ## Unloads balls that are far off screen and refills the ring around the camera.
@@ -545,20 +667,29 @@ func _spawn_target(offscreen: bool, area: Rect2) -> bool:
 
 func _free_spot(r: float, area: Rect2) -> Vector2:
 	var pad := 55.0 + r
-	for i in 400:
+	var ball_gap := r + BALL_R + 140.0
+	var ball_gap2 := ball_gap * ball_gap
+	var lava_y := _lava_top() - r - 20.0
+	# Squared distances only and fewer candidates: placement runs many times per
+	# streaming tick, so skipping sqrt pays off here.
+	for i in 96:
 		var pt := Vector2(
 			randf_range(area.position.x + pad, area.end.x - pad),
 			randf_range(area.position.y + pad, area.end.y - pad))
-		if pt.distance_to(ball_pos) < r + BALL_R + 140.0:
+		if pt.y > lava_y:
+			continue
+		if pt.distance_squared_to(ball_pos) < ball_gap2:
 			continue
 		var free := true
 		for b in bumpers:
-			if pt.distance_to(b.pos) < b.radius + r + 80.0:
+			var bg: float = b.radius + r + 80.0
+			if pt.distance_squared_to(b.pos) < bg * bg:
 				free = false
 				break
 		if free:
 			for o in targets:
-				if pt.distance_to(o.pos) < o.radius + r + 60.0:
+				var og: float = o.radius + r + 60.0
+				if pt.distance_squared_to(o.pos) < og * og:
 					free = false
 					break
 		if free:
@@ -579,10 +710,13 @@ func _kill_target(idx: int, speed: float) -> void:
 	_popup(tg.pos, "+%d" % gain, GREEN, 26)
 	if combo > 1:
 		_popup(tg.pos + Vector2(0.0, -34.0), "x%d" % combo, GOLD, 20)
+	if combo >= 5 and combo % 5 == 0:
+		_ring(ball_pos, GOLD, 16, 350.0)
 	_burst(tg.pos, tg.color, 18, 300.0)
 	_burst(tg.pos, WHITE, 8, 220.0)
 	shake = maxf(shake, 9.0)
 	hitstop = 0.055
+	bloom_level = minf(bloom_level + 0.5, 1.8)
 	_sfx("kill", 0.08, -6.0)
 	# Streaming refills the population shortly after the kill.
 
@@ -608,6 +742,8 @@ func _physics_process(delta: float) -> void:
 		"play":
 			_update_play(delta)
 
+	_update_ambient(delta)
+	_update_post_fx(delta)
 	_update_camera(delta)
 	mouse_pos = _screen_to_world(get_viewport().get_mouse_position())
 	queue_redraw()
@@ -670,8 +806,11 @@ func _update_play(delta: float) -> void:
 		_game_over()
 		return
 
+	ready_nudge_t = maxf(0.0, ready_nudge_t - delta)
+
 	if charging:
 		charge_t = minf(charge_t + delta, CHARGE_TIME)
+		_update_charge_motes(delta)
 
 	var wdt := delta * (SLOWMO if charging else 1.0)
 
@@ -684,6 +823,8 @@ func _update_play(delta: float) -> void:
 	ball_vel *= pow(SPEED_RETAIN, wdt)
 
 	_step_ball(wdt)
+	if mode != "play":
+		return
 	_update_targets(wdt)
 	_update_streaming(delta)
 	_update_bumpers(delta)
@@ -700,19 +841,21 @@ func _update_targets(dt: float) -> void:
 		tg.flash = maxf(0.0, tg.flash - dt * 5.0)
 		tg.slow_cd = maxf(0.0, tg.slow_cd - dt)
 
-		if tg.kind == "chaser":
+		if tg.kind == "chaser" or tg.kind == "armored":
+			# Spiked balls lumber after the ball as well, heavier than chasers.
+			var follow: float = chase_speed * (0.55 if tg.kind == "armored" else 1.0)
 			var dir: Vector2 = ball_pos - tg.pos
-			if dir.length() > 1.0:
-				tg.pos += dir.normalized() * chase_speed * dt
+			if dir.length_squared() > 1.0:
+				tg.pos += dir.normalized() * follow * dt
 		elif tg.kind == "drifter":
 			tg.pos += tg.vel * dt
 			if tg.pos.x < WORLD.position.x + tg.radius or tg.pos.x > WORLD.end.x - tg.radius:
 				tg.vel.x = -tg.vel.x
-			if tg.pos.y < WORLD.position.y + tg.radius or tg.pos.y > WORLD.end.y - tg.radius:
+			if tg.pos.y < WORLD.position.y + tg.radius or tg.pos.y > _lava_top() - tg.radius:
 				tg.vel.y = -tg.vel.y
 
 		tg.pos.x = clampf(tg.pos.x, WORLD.position.x + tg.radius, WORLD.end.x - tg.radius)
-		tg.pos.y = clampf(tg.pos.y, WORLD.position.y + tg.radius, WORLD.end.y - tg.radius)
+		tg.pos.y = clampf(tg.pos.y, WORLD.position.y + tg.radius, _lava_top() - tg.radius)
 
 
 func _update_bumpers(dt: float) -> void:
@@ -732,16 +875,23 @@ func _step_ball(dt: float) -> void:
 		_collide_walls()
 		_collide_bumpers()
 		_collide_targets()
+		if mode != "play":
+			return
+	_update_ball_motes(dt)
 	trail.append(ball_pos)
 	if trail.size() > 26:
 		trail.pop_front()
+
+
+## Y coordinate of the molten surface at the bottom of the world.
+func _lava_top() -> float:
+	return WORLD.end.y - LAVA_H
 
 
 func _collide_walls() -> void:
 	var min_x := WORLD.position.x + BALL_R
 	var max_x := WORLD.end.x - BALL_R
 	var min_y := WORLD.position.y + BALL_R
-	var max_y := WORLD.end.y - BALL_R
 
 	if ball_pos.x < min_x:
 		ball_pos.x = min_x
@@ -759,11 +909,16 @@ func _collide_walls() -> void:
 		if ball_vel.y < 0.0:
 			ball_vel.y = -ball_vel.y * WALL_REST
 			_on_bounce(Vector2(ball_pos.x, min_y), absf(ball_vel.y))
-	elif ball_pos.y > max_y:
-		ball_pos.y = max_y
-		if ball_vel.y > 0.0:
+
+	# The floor is molten: in play it ends the run, on the title screen it bounces.
+	var surface := _lava_top() - BALL_R
+	if ball_pos.y > surface:
+		ball_pos.y = surface
+		if mode == "play":
+			_lava_death()
+		elif ball_vel.y > 0.0:
 			ball_vel.y = -ball_vel.y * WALL_REST
-			_on_bounce(Vector2(ball_pos.x, max_y), absf(ball_vel.y))
+			_on_bounce(Vector2(ball_pos.x, surface), absf(ball_vel.y))
 
 
 func _collide_bumpers() -> void:
@@ -785,20 +940,39 @@ func _collide_bumpers() -> void:
 
 
 func _collide_targets() -> void:
+	# Any real contact returns below, so measure the speed once for the sweep.
+	var speed := ball_vel.length()
 	for i in range(targets.size() - 1, -1, -1):
 		var tg = targets[i]
 		var d: Vector2 = ball_pos - tg.pos
-		var rr: float = tg.radius + BALL_R
+		# Spiked balls collide out at the tip of their points.
+		var rr: float = tg.radius + BALL_R + (SPIKE_LEN if tg.kind == "armored" else 0.0)
 		var dist2 := d.length_squared()
 		if dist2 >= rr * rr:
 			continue
 		var n := d.normalized() if dist2 > 0.0001 else Vector2.RIGHT
-		var speed := ball_vel.length()
 		if speed >= tg.req:
+			shot_ready = true
+			# Shattering a ball ricochets you off its surface instead of passing
+			# through, so a fast shot keeps chaining around the arena.
+			ball_pos = tg.pos + n * rr
+			var vn_hit := ball_vel.dot(n)
+			if vn_hit < 0.0:
+				ball_vel -= 1.8 * vn_hit * n
+			# Every ricochet lifts the ball: add the kick, but never leave the
+			# ball headed downward, so chains fight the pull of gravity.
+			ball_vel.y = minf(ball_vel.y - RICOCHET_LIFT, -RICOCHET_LIFT * 0.5)
+			_clamp_speed()
 			_kill_target(i, speed)
+			_shards(tg.pos, ball_vel, tg.color, 8, 470.0, 0.5)
 			return
-		# too slow: the target bounces you back
+		# too slow for this one
 		ball_pos = tg.pos + n * rr
+		if tg.kind == "armored":
+			_spike_death()
+			return
+		# plain balls bounce you back, which still counts as a hit
+		shot_ready = true
 		var vn := ball_vel.dot(n)
 		if vn < 0.0:
 			ball_vel -= 1.7 * vn * n
@@ -812,10 +986,35 @@ func _collide_targets() -> void:
 		return
 
 
+## The ball touched the molten floor — sizzle out and end the run.
+func _lava_death() -> void:
+	died_in_lava = true
+	ball_vel = Vector2.ZERO
+	_burst(ball_pos, GOLD, 30, 470.0)
+	_burst(ball_pos, Color(1.0, 0.55, 0.15), 22, 360.0)
+	_burst(ball_pos, RED, 16, 280.0)
+	_sfx("kill", 0.14, -4.0)
+	_game_over()
+
+
+## Ran into a spiked ball without the speed to shatter it.
+func _spike_death() -> void:
+	died_on_spikes = true
+	ball_vel = Vector2.ZERO
+	_burst(ball_pos, RED, 28, 430.0)
+	_burst(ball_pos, PINK, 14, 310.0)
+	_burst(ball_pos, WHITE, 8, 220.0)
+	_sfx("kill", 0.10, -4.0)
+	_game_over()
+
+
 func _on_bounce(at: Vector2, strength: float) -> void:
 	var s := clampf(strength / 1400.0, 0.0, 1.0)
 	ball_flash = maxf(ball_flash, 0.4 + s)
+	bloom_level = minf(bloom_level + s * 0.22, 1.8)
 	_burst(at, CYAN, 2 + int(s * 6.0), 60.0 + s * 240.0)
+	if s > 0.18:
+		_shards(at, ball_vel, CYAN, 3 + int(s * 5.0), 150.0 + s * 380.0, 0.5)
 	shake = maxf(shake, s * 5.0)
 	var now := Time.get_ticks_msec()
 	if now - last_bounce_ms > 45:
@@ -832,15 +1031,47 @@ func _clamp_speed() -> void:
 # ------------------------------------------------------------------ fx
 func _burst(at: Vector2, color: Color, count: int, speed: float) -> void:
 	for i in count:
-		var p := Particle.new()
-		p.pos = at
 		var a := randf() * TAU
-		p.vel = Vector2(cos(a), sin(a)) * speed * randf_range(0.35, 1.0)
-		p.max_life = randf_range(0.25, 0.55)
-		p.life = p.max_life
-		p.size = randf_range(2.0, 4.5)
-		p.color = color
-		particles.append(p)
+		_emit(at, Vector2(cos(a), sin(a)) * speed * randf_range(0.35, 1.0),
+			color, randf_range(2.0, 4.5), randf_range(0.25, 0.55))
+	_cap_particles()
+
+
+## Sprayed in a cone — shatters, ricochets and launch backblast.
+func _shards(at: Vector2, dir: Vector2, color: Color, count: int, speed: float, spread: float) -> void:
+	var base := dir.normalized() if dir.length_squared() > 0.0001 else Vector2.RIGHT
+	for i in count:
+		var a := base.rotated(randf_range(-spread, spread))
+		_emit(at + base * randf_range(0.0, 10.0), a * speed * randf_range(0.35, 1.0),
+			color, randf_range(1.2, 3.2), randf_range(0.18, 0.42))
+	_cap_particles()
+
+
+## Evenly spaced shockwave — combos, launches, game over.
+func _ring(at: Vector2, color: Color, count: int, speed: float) -> void:
+	for i in count:
+		var a := TAU * float(i) / float(count) + randf_range(-0.08, 0.08)
+		_emit(at, Vector2(cos(a), sin(a)) * speed * randf_range(0.85, 1.0),
+			color, randf_range(1.6, 2.8), randf_range(0.24, 0.42))
+	_cap_particles()
+
+
+## Adds one particle with its own drag and vertical drift.
+func _emit(pos: Vector2, vel: Vector2, color: Color, size: float, life: float,
+		drag: float = 0.02, gy: float = 0.0) -> void:
+	var p := Particle.new()
+	p.pos = pos
+	p.vel = vel
+	p.color = color
+	p.size = size
+	p.max_life = life
+	p.life = life
+	p.drag = drag
+	p.gy = gy
+	particles.append(p)
+
+
+func _cap_particles() -> void:
 	if particles.size() > 700:
 		particles = particles.slice(particles.size() - 700)
 
@@ -848,11 +1079,60 @@ func _burst(at: Vector2, color: Color, count: int, speed: float) -> void:
 func _update_particles(dt: float) -> void:
 	for i in range(particles.size() - 1, -1, -1):
 		var p = particles[i]
+		p.vel.y += p.gy * dt
 		p.pos += p.vel * dt
-		p.vel *= pow(0.02, dt)
+		p.vel *= pow(p.drag, dt)
 		p.life -= dt
 		if p.life <= 0.0:
 			particles.remove_at(i)
+
+
+## Fine sparks streaming off a fast-moving ball.
+func _update_ball_motes(dt: float) -> void:
+	mote_t -= dt
+	if mote_t > 0.0:
+		return
+	mote_t = 0.026
+	var spd := ball_vel.length()
+	if spd < 420.0:
+		return
+	_emit(ball_pos + Vector2(randf_range(-5.0, 5.0), randf_range(-5.0, 5.0)),
+		-ball_vel * 0.12 + Vector2(randf_range(-26.0, 26.0), randf_range(-26.0, 26.0)),
+		Color(0.55, 0.95, 1.0, 0.70), randf_range(1.2, 2.4), randf_range(0.16, 0.30), 0.05)
+	_cap_particles()
+
+
+## Grains of light pulled into the ball while a shot charges.
+func _update_charge_motes(dt: float) -> void:
+	charge_mote_t -= dt
+	if charge_mote_t > 0.0:
+		return
+	charge_mote_t = 0.05
+	var a := randf() * TAU
+	var from := ball_pos + Vector2(cos(a), sin(a)) * randf_range(46.0, 76.0)
+	_emit(from, (ball_pos - from) * 1.7, Color(0.65, 0.95, 1.0, 0.85),
+		randf_range(1.4, 2.6), randf_range(0.20, 0.36))
+	_cap_particles()
+
+
+## Embers rising off the lava wherever the camera can see it.
+func _update_ambient(dt: float) -> void:
+	ember_t -= dt
+	if ember_t > 0.0:
+		return
+	ember_t = 0.045
+	var view := _view_rect()
+	var top := _lava_top()
+	if view.end.y < top - 30.0:
+		return
+	var left := maxf(view.position.x, WORLD.position.x)
+	var right := minf(view.end.x, WORLD.end.x)
+	if right <= left:
+		return
+	_emit(Vector2(randf_range(left, right), top + randf_range(0.0, 56.0)),
+		Vector2(randf_range(-22.0, 22.0), randf_range(-95.0, -45.0)),
+		Color(1.0, 0.55, 0.18, 0.85), randf_range(1.2, 2.6), randf_range(0.5, 1.1), 0.6, -40.0)
+	_cap_particles()
 
 
 func _popup(at: Vector2, text: String, color: Color, size: int) -> void:
@@ -888,6 +1168,7 @@ func _draw() -> void:
 	_draw_world_floor()
 	_draw_grid()
 	_draw_arena()
+	_draw_lava()
 	_draw_bumpers()
 	_draw_targets()
 	if charging and mode == "play":
@@ -898,6 +1179,7 @@ func _draw() -> void:
 	_draw_reticle()
 
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	_draw_vignette()
 	if mode != "title":
 		_draw_hud()
 		if mode == "play":
@@ -942,20 +1224,42 @@ func _draw_arena() -> void:
 	draw_rect(WORLD, Color(0.45, 0.80, 1.0, 0.30), false, 2.0)
 
 	# Depth ticks make it obvious where the world edge is while scrolling.
-	for x in range(0, int(WORLD.size.x) + 1, 256):
-		var on_edge := x == 0 or x >= int(WORLD.size.x) - 1
-		var c := Color(0.55, 0.90, 1.0, 0.45 if on_edge else 0.16)
-		draw_line(Vector2(WORLD.position.x + x, WORLD.position.y),
-			Vector2(WORLD.position.x + x, WORLD.position.y + (26.0 if on_edge else 14.0)), c, 2.0, true)
-		draw_line(Vector2(WORLD.position.x + x, WORLD.end.y),
-			Vector2(WORLD.position.x + x, WORLD.end.y - (26.0 if on_edge else 14.0)), c, 2.0, true)
-	for y in range(0, int(WORLD.size.y) + 1, 256):
-		var on_edge := y == 0 or y >= int(WORLD.size.y) - 1
-		var c := Color(0.55, 0.90, 1.0, 0.45 if on_edge else 0.16)
-		draw_line(Vector2(WORLD.position.x, WORLD.position.y + y),
-			Vector2(WORLD.position.x + (26.0 if on_edge else 14.0), WORLD.position.y + y), c, 2.0, true)
-		draw_line(Vector2(WORLD.end.x, WORLD.position.y + y),
-			Vector2(WORLD.end.x - (26.0 if on_edge else 14.0), WORLD.position.y + y), c, 2.0, true)
+	# Only the ticks inside the view are emitted, so this scales with the screen
+	# instead of the whole 3840 x 2560 world.
+	var vis := _view_rect()
+	var tick := 256
+	var top := WORLD.position.y
+	var bot := WORLD.end.y
+	var left := WORLD.position.x
+	var right := WORLD.end.x
+	var show_top := vis.position.y < top + 30.0
+	var show_bot := vis.end.y > bot - 30.0
+	if show_top or show_bot:
+		var x_lo := maxi(int(floorf(vis.position.x / float(tick))) * tick, 0)
+		var x_hi := mini(int(ceilf(vis.end.x / float(tick))) * tick, int(WORLD.size.x))
+		for x in range(x_lo, x_hi + 1, tick):
+			var on_edge := x == 0 or x >= int(WORLD.size.x) - 1
+			var c := Color(0.55, 0.90, 1.0, 0.45 if on_edge else 0.16)
+			if show_top:
+				draw_line(Vector2(left + x, top), Vector2(left + x, top + (26.0 if on_edge else 14.0)),
+					c, 2.0, true)
+			if show_bot:
+				draw_line(Vector2(left + x, bot), Vector2(left + x, bot - (26.0 if on_edge else 14.0)),
+					c, 2.0, true)
+	var show_left := vis.position.x < left + 30.0
+	var show_right := vis.end.x > right - 30.0
+	if show_left or show_right:
+		var y_lo := maxi(int(floorf(vis.position.y / float(tick))) * tick, 0)
+		var y_hi := mini(int(ceilf(vis.end.y / float(tick))) * tick, int(WORLD.size.y))
+		for y in range(y_lo, y_hi + 1, tick):
+			var on_edge := y == 0 or y >= int(WORLD.size.y) - 1
+			var c := Color(0.55, 0.90, 1.0, 0.45 if on_edge else 0.16)
+			if show_left:
+				draw_line(Vector2(left, top + y), Vector2(left + (26.0 if on_edge else 14.0), top + y),
+					c, 2.0, true)
+			if show_right:
+				draw_line(Vector2(right, top + y), Vector2(right - (26.0 if on_edge else 14.0), top + y),
+					c, 2.0, true)
 
 	var c := Color(0.55, 0.90, 1.0, 0.55)
 	var l := 54.0
@@ -971,6 +1275,50 @@ func _draw_arena() -> void:
 	draw_line(e, e - Vector2(0.0, l), c, 3.0, true)
 
 
+## Animated molten band along the bottom of the world.
+func _draw_lava() -> void:
+	var top := _lava_top()
+	var vis := _view_rect().grow(CULL_MARGIN)
+	if vis.end.y < top or vis.position.y > WORLD.end.y:
+		return
+	var left := maxf(vis.position.x, WORLD.position.x)
+	var right := minf(vis.end.x, WORLD.end.x)
+	if right <= left:
+		return
+
+	var pulse := 0.5 + 0.5 * sin(t * 2.4)
+	# heat haze rising off the surface
+	for i in 3:
+		var h := 22.0 + i * 24.0
+		draw_rect(Rect2(left, top - h, right - left, h),
+			Color(1.0, 0.34, 0.10, 0.05 + 0.03 * pulse))
+	# molten body
+	draw_rect(Rect2(left, top, right - left, WORLD.end.y - top),
+		Color(0.36, 0.05, 0.04, 0.94))
+	draw_rect(Rect2(left, top, right - left, 34.0), Color(1.0, 0.40, 0.07, 0.55))
+	draw_rect(Rect2(left, WORLD.end.y - 26.0, right - left, 26.0), Color(1.0, 0.30, 0.05, 0.22))
+
+	# churning surface
+	var pts := PackedVector2Array()
+	var x := left
+	while x <= right:
+		pts.append(Vector2(x, top + sin(x * 0.020 + t * 3.1) * 6.0 + sin(x * 0.055 - t * 4.7) * 3.0))
+		x += 24.0
+	if pts.size() >= 2:
+		draw_polyline(pts, Color(1.70, 0.85, 0.26, 0.85), 3.0, true)
+
+	# bubbles drifting up through the melt
+	var span := WORLD.size.x
+	var depth := WORLD.end.y - top - 20.0
+	for i in 16:
+		var bx := WORLD.position.x + fmod(float(i) * 271.0 + t * 22.0, span)
+		if bx < left or bx > right:
+			continue
+		var by := top + 16.0 + fmod(float(i) * 97.0 + t * 30.0, depth)
+		draw_circle(Vector2(bx, by), 1.6 + fmod(float(i), 3.0),
+			Color(1.0, 0.66, 0.22, 0.42))
+
+
 func _draw_bumpers() -> void:
 	var vis := _view_rect().grow(CULL_MARGIN)
 	for b in bumpers:
@@ -982,14 +1330,14 @@ func _draw_bumpers() -> void:
 		draw_circle(b.pos, r + 8.0 + f * 8.0, Color(0.35, 0.62, 1.0, 0.05 + f * 0.10))
 		draw_circle(b.pos, r, Color(0.12, 0.20, 0.42, 0.70))
 		var ring := Color(0.42, 0.66, 1.0, 0.55).lerp(WHITE, f)
-		draw_arc(b.pos, r, 0.0, TAU, 40, ring, 2.0 + f * 3.0, true)
+		draw_arc(b.pos, r, 0.0, TAU, 28, ring, 2.0 + f * 3.0, true)
 		for k in 6:
-			var a := spin + k * TAU / 6.0
+			var a: float = spin + k * TAU / 6.0
 			var inner: Vector2 = b.pos + Vector2(cos(a), sin(a)) * (r * 0.58)
 			var outer: Vector2 = b.pos + Vector2(cos(a), sin(a)) * (r * 0.86)
 			draw_line(inner, outer, Color(0.45, 0.70, 1.0, 0.20 + f * 0.4), 2.0, true)
 		draw_circle(b.pos, r * 0.16, Color(0.65, 0.88, 1.0, 0.25 + f * 0.6))
-		draw_arc(b.pos, r * 0.62, 0.0, TAU, 28, Color(0.45, 0.70, 1.0, 0.10), 1.0, true)
+		draw_arc(b.pos, r * 0.62, 0.0, TAU, 20, Color(0.45, 0.70, 1.0, 0.10), 1.0, true)
 
 
 func _draw_targets() -> void:
@@ -1012,7 +1360,7 @@ func _draw_targets() -> void:
 			Color(base.r * 0.62, base.g * 0.62, base.b * 0.62, 0.95 * fade))
 		draw_circle(tg.pos + Vector2(-r * 0.26, -r * 0.26), r * 0.36,
 			Color(1.0, 1.0, 1.0, (0.42 + f * 0.4) * fade))
-		draw_arc(tg.pos, r, 0.0, TAU, 32, Color(base.r, base.g, base.b, 0.9 * fade),
+		draw_arc(tg.pos, r, 0.0, TAU, 24, Color(base.r, base.g, base.b, 0.9 * fade),
 			2.0 + f * 3.0, true)
 
 		match tg.kind:
@@ -1023,12 +1371,19 @@ func _draw_targets() -> void:
 						Color(1.0, 0.85, 0.95, 0.55 * fade))
 			"armored":
 				var ready: bool = charged and power >= tg.req
-				var rc := GREEN if ready else Color(1.0, 0.62, 0.22, 0.60)
+				var rc := GREEN if ready else Color(1.0, 0.62, 0.22, 0.75)
 				rc.a *= fade
-				for k in 8:
-					var a0 := t * 1.2 + k * TAU / 8.0
-					draw_arc(tg.pos, r + 9.0, a0, a0 + 0.30, 6, rc, 3.0, true)
-				draw_arc(tg.pos, r * 0.55, 0.0, TAU, 24,
+				# Points that actually stick out past the shell.
+				var spike_spin: float = t * 0.9 + tg.phase
+				for k in 10:
+					var a: float = spike_spin + k * TAU / 10.0
+					var out := Vector2(cos(a), sin(a))
+					var side_w := out.orthogonal() * (r * 0.16)
+					var root: Vector2 = tg.pos + out * (r * 0.88)
+					var prong: Vector2 = tg.pos + out * (r + SPIKE_LEN)
+					draw_colored_polygon(PackedVector2Array([prong, root + side_w, root - side_w]), rc)
+					draw_line(root, prong, Color(1.0, 0.95, 0.85, 0.35 * fade), 1.0, true)
+				draw_arc(tg.pos, r * 0.55, 0.0, TAU, 16,
 					Color(base.r, base.g, base.b, 0.55 * fade), 2.0, true)
 			"chaser":
 				var dir: Vector2 = (ball_pos - tg.pos).normalized()
@@ -1044,32 +1399,87 @@ func _draw_targets() -> void:
 						Color(1.0, 1.0, 1.0, (0.34 - k * 0.12) * fade))
 
 
-## Straight aim line only — no bounce prediction.
+## Charged-shot preview: a ballistic arc stepped with the same forces the ball
+## feels (gravity and speed decay), ending at the first thing it would touch.
 func _draw_aim() -> void:
 	var dir := mouse_pos - ball_pos
 	if dir.length() < 1.0:
 		dir = Vector2.RIGHT
 	dir = dir.normalized()
 
-	var p := clampf(charge_t / CHARGE_TIME, 0.0, 1.0)
-	var length := lerpf(120.0, 520.0, p)
-	var start := BALL_R + 13.0
-	var to := ball_pos + dir * length
-	var side := dir.orthogonal()
+	var path := _predict_arc(dir * _charge_power())
+	var n := path.size()
+	if n < 2:
+		return
 
-	var seg := 3
-	for i in seg:
-		var a0 := float(i) / float(seg)
-		var a1 := float(i + 1) / float(seg)
-		var p0 := ball_pos + dir * lerpf(start, length, a0)
-		var p1 := ball_pos + dir * lerpf(start, length, a1)
-		draw_line(p0, p1, Color(0.55, 0.95, 1.0, lerpf(0.55, 0.16, a0)), 3.0, true)
+	var tip: Vector2 = path[n - 1]
+	if tip.distance_to(ball_pos) < BALL_R + 12.0:
+		return
 
+	for i in n:
+		var pt: Vector2 = path[i]
+		if pt.distance_to(ball_pos) < BALL_R + 13.0:
+			continue
+		var u := float(i) / float(n)
+		draw_circle(pt, lerpf(2.8, 1.1, u), Color(0.55, 0.95, 1.0, lerpf(0.52, 0.12, u)))
+
+	var heading: Vector2 = tip - path[n - 2]
+	if heading.length() < 0.001:
+		heading = dir
+	heading = heading.normalized()
+	var side := heading.orthogonal()
+	# Red arrowhead warns when the shot is about to end in the lava.
+	var col := Color(0.85, 1.0, 1.0, 0.85)
+	if tip.y >= _lava_top() - BALL_R - 4.0:
+		col = Color(1.0, 0.42, 0.30, 0.95)
 	draw_colored_polygon(PackedVector2Array([
-		to + dir * 12.0,
-		to + side * 7.5 - dir * 1.0,
-		to - side * 7.5 - dir * 1.0,
-	]), Color(0.85, 1.0, 1.0, 0.85))
+		tip + heading * 13.0,
+		tip + side * 7.5 - heading * 1.0,
+		tip - side * 7.5 - heading * 1.0,
+	]), col)
+
+
+## Steps the launch forward in small slices and stops at the first wall, lava
+## surface, bumper or ball along the way.
+func _predict_arc(v0: Vector2) -> PackedVector2Array:
+	var pts := PackedVector2Array()
+	var pos := ball_pos
+	var vel := v0
+	var h := 1.0 / 60.0
+	var surface := _lava_top() - BALL_R
+	var min_x := WORLD.position.x + BALL_R
+	var max_x := WORLD.end.x - BALL_R
+	var min_y := WORLD.position.y + BALL_R
+	# Bodies further away than the shot can possibly travel are dropped up front,
+	# so the per-step sweep tests a handful of candidates instead of every ball.
+	var reach := v0.length() * 1.5 + 80.0
+	var reach2 := reach * reach
+	var bodies: Array = []
+	var radii: Array = []
+	for b in bumpers:
+		if b.pos.distance_squared_to(ball_pos) < reach2:
+			bodies.append(b.pos)
+			radii.append(b.radius + BALL_R)
+	for tg in targets:
+		if tg.pos.distance_squared_to(ball_pos) < reach2:
+			bodies.append(tg.pos)
+			radii.append(tg.radius + BALL_R + (SPIKE_LEN if tg.kind == "armored" else 0.0))
+	for i in 90:
+		vel.y += GRAVITY * h
+		vel *= pow(SPEED_RETAIN, h)
+		pos += vel * h
+		pts.append(pos)
+		if pos.x < min_x or pos.x > max_x or pos.y < min_y or pos.y > surface:
+			break
+		var blocked := false
+		for k in bodies.size():
+			var gap: float = radii[k]
+			if pos.distance_squared_to(bodies[k]) < gap * gap:
+				blocked = true
+				break
+		if blocked:
+			break
+	return pts
 
 
 # ------------------------------------------------------------------ draw actors
@@ -1081,15 +1491,18 @@ func _draw_ball() -> void:
 
 	draw_circle(ball_pos, BALL_R + 18.0 + ball_flash * 8.0, Color(0.40, 0.90, 1.0, 0.05 + ball_flash * 0.04))
 	draw_circle(ball_pos, BALL_R + 7.0, Color(0.50, 0.95, 1.0, 0.12))
-	draw_circle(ball_pos, BALL_R, CYAN)
-	draw_circle(ball_pos - Vector2(BALL_R * 0.3, BALL_R * 0.3), BALL_R * 0.45, WHITE)
+	draw_circle(ball_pos, BALL_R, CYAN_HOT)
+	draw_circle(ball_pos - Vector2(BALL_R * 0.3, BALL_R * 0.3), BALL_R * 0.45, WHITE_HOT)
+
+	if mode == "play" and shot_ready:
+		draw_arc(ball_pos, BALL_R + 12.0, 0.0, TAU, 40, Color(0.55, 0.95, 1.0, 0.32), 2.0, true)
 
 	if charging:
 		var c := clampf(charge_t / CHARGE_TIME, 0.0, 1.0)
-		draw_arc(ball_pos, BALL_R + 11.0, 0.0, TAU, 48, Color(1.0, 1.0, 1.0, 0.10), 5.0, true)
+		draw_arc(ball_pos, BALL_R + 11.0, 0.0, TAU, 32, Color(1.0, 1.0, 1.0, 0.10), 5.0, true)
 		if c > 0.0:
 			var col := Color.from_hsv(lerpf(0.52, 0.86, c), 0.80, 1.0)
-			draw_arc(ball_pos, BALL_R + 11.0, -PI * 0.5, -PI * 0.5 + TAU * c, 48, col, 5.0, true)
+			draw_arc(ball_pos, BALL_R + 11.0, -PI * 0.5, -PI * 0.5 + TAU * c, 32, col, 5.0, true)
 			draw_circle(ball_pos, BALL_R + 5.0, Color(col.r, col.g, col.b, 0.08))
 
 
@@ -1119,7 +1532,9 @@ func _draw_reticle() -> void:
 	var col := Color(0.75, 0.95, 1.0, 0.85)
 	if charging:
 		col = Color(1.0, 0.95, 0.80, 0.95)
-	draw_arc(mouse_pos, 9.0, 0.0, TAU, 28, col, 1.5, true)
+	elif not shot_ready:
+		col = Color(0.85, 0.45, 0.55, 0.55)
+	draw_arc(mouse_pos, 9.0, 0.0, TAU, 20, col, 1.5, true)
 	draw_circle(mouse_pos, 1.8, col)
 	draw_line(mouse_pos + Vector2(-17.0, 0.0), mouse_pos + Vector2(-6.0, 0.0), col, 1.5, true)
 	draw_line(mouse_pos + Vector2(6.0, 0.0), mouse_pos + Vector2(17.0, 0.0), col, 1.5, true)
@@ -1134,6 +1549,9 @@ func _draw_reticle() -> void:
 func _draw_hud() -> void:
 	_text("SCORE", Vector2(48.0, 28.0), 11, DIM)
 	_text(str(score), Vector2(48.0, 56.0), 26, WHITE, true)
+	if mode == "play":
+		_text("SHOT READY" if shot_ready else "HIT A BALL TO RELOAD", Vector2(48.0, 82.0), 12,
+			CYAN if shot_ready else RED)
 
 	_text_right("SMASHED", Vector2(1232.0, 28.0), 11, DIM)
 	_text_right(str(kills), Vector2(1232.0, 56.0), 26, WHITE, true)
@@ -1179,6 +1597,8 @@ func _draw_minimap() -> void:
 	for tg in targets:
 		draw_circle(mm.position + (tg.pos - WORLD.position) * sc, 1.8,
 			Color(tg.color.r, tg.color.g, tg.color.b, 0.85))
+	draw_rect(Rect2(mm.position.x, mm.position.y + (_lava_top() - WORLD.position.y) * sc.y,
+		mm.size.x, LAVA_H * sc.y), Color(1.0, 0.45, 0.10, 0.55))
 
 	var vw := _view_rect()
 	var vr := Rect2(mm.position + (vw.position - WORLD.position) * sc, vw.size * sc)
@@ -1198,10 +1618,13 @@ func _draw_title() -> void:
 	_text_center_at(Vector2(640.0, 248.0), "BOUNCE BACK", 88, WHITE, bold_font)
 	_text_center_at(Vector2(640.0, 290.0), "hold  ·  charge  ·  ricochet", 18, Color(0.55, 0.85, 1.0, 0.75))
 
-	_rule(380.0, "HOLD", "charge your bounce")
-	_rule(414.0, "RELEASE", "launch toward the cursor")
-	_rule(448.0, "RICOCHET", "shatter balls at speed")
-	_rule(482.0, "EXPLORE", "the world scrolls past the screen")
+	_rule(366.0, "HOLD", "charge your bounce")
+	_rule(394.0, "RELEASE", "launch toward the cursor")
+	_rule(422.0, "RICOCHET", "shatter balls at speed")
+	_rule(450.0, "EARN SHOTS", "hit a ball to shoot again")
+	_rule(478.0, "SPIKES", "they hunt you, slow hits kill")
+	_rule(506.0, "EXPLORE", "the world scrolls past the screen")
+	_rule(534.0, "LAVA", "the molten floor ends your run")
 
 	var pulse := 0.55 + 0.45 * sin(t * 3.2)
 	_text_center_at(Vector2(640.0, 580.0), "CLICK TO START", 22, Color(0.85, 0.97, 1.0, pulse))
@@ -1212,7 +1635,12 @@ func _draw_title() -> void:
 
 func _draw_game_over() -> void:
 	draw_rect(Rect2(0.0, 0.0, 1280.0, 720.0), Color(0.02, 0.015, 0.04, 0.78))
-	_text_center_at(Vector2(640.0, 250.0), "TIME'S UP", 68, PINK, bold_font)
+	var headline := "TIME'S UP"
+	if died_on_spikes:
+		headline = "IMPALED"
+	elif died_in_lava:
+		headline = "MELTED"
+	_text_center_at(Vector2(640.0, 250.0), headline, 68, PINK, bold_font)
 	_text_center_at(Vector2(640.0, 320.0), "SCORE", 12, DIM)
 	_text_center_at(Vector2(640.0, 392.0), str(score), 72, WHITE, bold_font)
 	_text_center_at(Vector2(640.0, 442.0), "SMASHED %d" % kills, 20, CYAN)
