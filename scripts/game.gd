@@ -29,21 +29,6 @@ const START_TIME := 32.0         # seconds on the clock at the start
 const TIME_PER_KILL := 2.4       # seconds added per ball broken
 const TIME_CAP := 48.0           # clock can never exceed this
 
-const POWERUP_CHANCE := 0.14     # chance a shattered ball drops a pickup
-const POWERUP_LIFE := 11.0       # seconds a pickup lasts before fading
-const POWERUP_PICK_R := 18.0     # pickup radius beyond the ball
-const POWERUP_TIME_BONUS := 6.0  # seconds added by a clock pickup
-const RAPID_TIME := 5.0          # free reload window
-const OVERDRIVE_TIME := 6.0      # every hit shatters window
-
-const BOSS_FIRST_SCORE := 3000   # score needed before the first boss appears
-const BOSS_NEXT_SCORE := 4500    # extra score needed before each later boss
-const BOSS_TARGET_CAP := 10      # normal balls allowed while a boss is alive
-const BOSS_HIT_SPEED := 620.0    # impact speed that actually damages the boss
-const BOSS_SHOT_SPEED := 210.0   # speed of the boss's ember volley
-const BOSS_SHOT_LIFE := 5.0      # seconds before a volley shot burns out
-const BOSS_DEFLECT_SPEED := 500.0  # ball speed that knocks volley shots away
-
 const GRAVITY := 1000.0          # downward pull on the ball (px/s²)
 const LAVA_H := 120.0            # depth of the molten floor at the bottom
 const WALL_REST := 0.97          # energy kept when bouncing off a wall
@@ -110,36 +95,10 @@ class FloatText:
 	var life: float
 	var max_life: float
 
-class Powerup:
-	var pos: Vector2
-	var kind: String        # time | rapid | boost
-	var life: float
-	var age: float
-	var phase: float
-
-class Boss:
-	var pos: Vector2
-	var radius: float = 62.0
-	var hp: int = 6
-	var max_hp: int = 6
-	var flash: float = 0.0
-	var phase: float = 0.0
-	var core: float = 0.0
-	var shot_cd: float = 2.0
-	var slow_cd: float = 0.0
-
-class BossShot:
-	var pos: Vector2
-	var vel: Vector2
-	var radius: float = 13.0
-	var life: float = 4.0
-	var phase: float = 0.0
-
 # ------------------------------------------------------------------ state
 var mode: String = "title"          # title | play | over
 var died_in_lava: bool = false
 var died_on_spikes: bool = false
-var died_by_blast: bool = false
 var kills: int = 0
 var score: int = 0
 var best: int = 0
@@ -148,8 +107,6 @@ var time_left: float = 0.0
 var max_time: float = TIME_CAP
 var combo: int = 0
 var combo_t: float = 0.0
-var rapid_t: float = 0.0
-var overdrive_t: float = 0.0
 var shake: float = 0.0
 var hitstop: float = 0.0
 var banner: String = ""
@@ -162,9 +119,6 @@ var bloom_level: float = 0.35
 var vignette_t: float = 0.2
 var glow_env: Environment
 var vignette_tex: ImageTexture
-var show_stats: bool = false
-var fps_avg: float = 60.0
-var fx_stripped: bool = false
 
 var cam: Vector2 = Vector2.ZERO        # world point shown at screen center
 var cam_snap: bool = true
@@ -184,18 +138,11 @@ var mouse_seen: bool = false
 
 var bumpers: Array = []
 var targets: Array = []
-var powerups: Array = []
-var boss: Boss = null
-var boss_shots: Array = []
-var boss_beaten: int = 0
-var boss_next_score: int = BOSS_FIRST_SCORE
 var particles: Array = []
 var popups: Array = []
 var mote_t: float = 0.0
 var charge_mote_t: float = 0.0
 var ember_t: float = 0.0
-var arc_bodies: Array = []      # reused by the aim preview each frame
-var arc_radii: Array = []
 
 var body_font: Font
 var bold_font: Font
@@ -225,12 +172,6 @@ func _setup_fonts() -> void:
 
 ## Engine bloom: a glow-enabled environment over the 2D canvas. Colours above
 ## 1.0 in the palette bleed light, and the intensity is driven below.
-func _toggle_glow() -> void:
-	if glow_env == null:
-		return
-	glow_env.glow_enabled = not glow_env.glow_enabled
-
-
 func _setup_post_fx() -> void:
 	var env := Environment.new()
 	env.background_mode = Environment.BG_CANVAS
@@ -278,17 +219,7 @@ func _danger_level() -> float:
 ## vignette closes in with the same danger and flares red at the edges.
 func _update_post_fx(dt: float) -> void:
 	var danger := _danger_level()
-	# Only sample frame rate while the window has focus, so an alt-tabbed window
-	# is not mistaken for a machine that cannot afford the glow pass.
-	if get_window().has_focus():
-		fps_avg = lerpf(fps_avg, float(Engine.get_frames_per_second()), 1.0 - exp(-1.5 * dt))
 	if glow_env != null:
-		# One-way safety net: if bloom clearly cannot keep up, drop the glow pass
-		# for the rest of the session. F2 turns it back on.
-		if not fx_stripped and t > 6.0 and fps_avg < 45.0:
-			fx_stripped = true
-			glow_env.glow_enabled = false
-			_banner("PERFORMANCE MODE")
 		var target := 0.35
 		if mode == "play":
 			target += 0.45 * (clampf(charge_t / CHARGE_TIME, 0.0, 1.0) if charging else 0.0)
@@ -415,10 +346,6 @@ func _unhandled_input(event: InputEvent) -> void:
 			if muted:
 				for p in players:
 					p.stop()
-		elif key.keycode == KEY_F2 and key.pressed:
-			_toggle_glow()
-		elif key.keycode == KEY_F3 and key.pressed:
-			show_stats = not show_stats
 		elif key.keycode == KEY_SPACE:
 			if key.pressed:
 				if mode == "play":
@@ -443,16 +370,12 @@ func _enter_title() -> void:
 	mode = "title"
 	shot_ready = true
 	ready_nudge_t = 0.0
-	boss = null
-	boss_shots.clear()
-	boss_next_score = BOSS_FIRST_SCORE
 	ball_pos = WORLD.get_center()
 	ball_vel = Vector2.RIGHT.rotated(randf() * TAU) * 300.0
 	ball_flash = 0.0
 	trail.clear()
 	targets.clear()
 	bumpers.clear()
-	powerups.clear()
 	particles.clear()
 	popups.clear()
 	charging = false
@@ -479,13 +402,8 @@ func _start_game() -> void:
 	mode = "play"
 	died_in_lava = false
 	died_on_spikes = false
-	died_by_blast = false
 	shot_ready = true
 	ready_nudge_t = 0.0
-	boss = null
-	boss_shots.clear()
-	boss_beaten = 0
-	boss_next_score = BOSS_FIRST_SCORE
 	kills = 0
 	score = 0
 	new_best = false
@@ -503,9 +421,6 @@ func _start_game() -> void:
 	ball_vel = Vector2.RIGHT.rotated(randf() * TAU) * 320.0
 	ball_flash = 0.0
 	trail.clear()
-	powerups.clear()
-	rapid_t = 0.0
-	overdrive_t = 0.0
 	particles.clear()
 	popups.clear()
 	cam = ball_pos
@@ -568,7 +483,7 @@ func _fire() -> void:
 	if dir.length() < 1.0:
 		dir = Vector2.RIGHT
 	ball_vel = dir.normalized() * power
-	shot_ready = rapid_t > 0.0     # rapid fire keeps the launcher loaded
+	shot_ready = false
 	trail.clear()
 	_burst(ball_pos, CYAN, 14, 240.0)
 	_ring(ball_pos, CYAN, 12, 260.0)
@@ -677,19 +592,17 @@ func _update_streaming(dt: float) -> void:
 		if view.has_point(tg.pos):
 			visible += 1
 
-	# Fewer ordinary balls while the boss is up so the fight has room to breathe.
-	var cap := BOSS_TARGET_CAP if boss != null else TARGET_POP
 	var guard := 0
 	while guard < 24:
 		guard += 1
 		# Always leave something to shoot at; otherwise refill off screen.
 		if visible < MIN_VISIBLE:
-			if targets.size() >= cap:
+			if targets.size() >= TARGET_POP:
 				_remove_farthest()
 			if _spawn_target(false, view.grow(-70.0)):
 				visible += 1
 				continue
-		if targets.size() >= cap:
+		if targets.size() >= TARGET_POP:
 			break
 		if not _spawn_target(true, _stream_area()):
 			break
@@ -805,241 +718,7 @@ func _kill_target(idx: int, speed: float) -> void:
 	hitstop = 0.055
 	bloom_level = minf(bloom_level + 0.5, 1.8)
 	_sfx("kill", 0.08, -6.0)
-	if boss == null and score >= boss_next_score:
-		_spawn_boss()
-	if powerups.size() < 3 and randf() < POWERUP_CHANCE:
-		_spawn_powerup(tg.pos)
 	# Streaming refills the population shortly after the kill.
-
-
-# ------------------------------------------------------------------ powerups
-## Occasionally drops a pickup where a ball shattered.
-func _spawn_powerup(at: Vector2) -> void:
-	var kinds := ["time", "rapid", "boost"]
-	var p := Powerup.new()
-	p.kind = kinds[randi() % kinds.size()]
-	p.pos = at
-	p.life = POWERUP_LIFE
-	p.age = 0.0
-	p.phase = randf() * TAU
-	powerups.append(p)
-
-
-func _powerup_color(kind: String) -> Color:
-	match kind:
-		"time":
-			return GOLD
-		"rapid":
-			return CYAN
-		_:
-			return PINK
-
-
-## Pickups drift upward, time out, and are collected by touching them.
-func _update_powerups(dt: float) -> void:
-	var pick := BALL_R + POWERUP_PICK_R
-	var pick2 := pick * pick
-	for i in range(powerups.size() - 1, -1, -1):
-		var p = powerups[i]
-		p.age += dt
-		p.life -= dt
-		p.pos.y -= 20.0 * dt
-		p.pos.x += sin(p.age * 2.4 + p.phase) * 14.0 * dt
-		p.pos.x = clampf(p.pos.x, WORLD.position.x + 30.0, WORLD.end.x - 30.0)
-		p.pos.y = clampf(p.pos.y, WORLD.position.y + 30.0, _lava_top() - 30.0)
-		if p.life <= 0.0:
-			powerups.remove_at(i)
-			continue
-		if ball_pos.distance_squared_to(p.pos) < pick2:
-			powerups.remove_at(i)
-			_apply_powerup(p)
-
-
-func _apply_powerup(p: Powerup) -> void:
-	var c := _powerup_color(p.kind)
-	var label := ""
-	match p.kind:
-		"time":
-			time_left = minf(time_left + POWERUP_TIME_BONUS, TIME_CAP)
-			label = "+%d SECONDS" % int(POWERUP_TIME_BONUS)
-		"rapid":
-			rapid_t = RAPID_TIME
-			label = "RAPID FIRE"
-		_:
-			overdrive_t = OVERDRIVE_TIME
-			label = "OVERDRIVE"
-	_popup(p.pos + Vector2(0.0, -28.0), label, c, 20)
-	_banner(label)
-	_burst(p.pos, c, 16, 240.0)
-	_burst(p.pos, WHITE, 6, 170.0)
-	_ring(p.pos, c, 12, 260.0)
-	bloom_level = minf(bloom_level + 0.45, 1.8)
-	shake = maxf(shake, 4.0)
-	_sfx("wave", 0.06, -6.0)
-
-
-# ------------------------------------------------------------------ boss fight
-func _spawn_boss() -> void:
-	var b := Boss.new()
-	b.max_hp = 6 + boss_beaten * 2
-	b.hp = b.max_hp
-	b.pos = ball_pos + Vector2(0.0, -380.0)
-	b.phase = randf() * TAU
-	_clamp_boss_to_view(b)
-	boss = b
-	boss_shots.clear()
-	_banner("THE WARDEN AWAKENS")
-	shake = 12.0
-	bloom_level = minf(bloom_level + 0.9, 1.8)
-	_sfx("over", 0.0, -10.0)
-
-
-## Keeps the boss framed by the camera, and inside the world above the lava.
-func _clamp_boss_to_view(b: Boss) -> void:
-	var view := _view_rect()
-	var pad := b.radius + 46.0
-	b.pos.x = clampf(b.pos.x, maxf(view.position.x + pad, WORLD.position.x + pad),
-		minf(view.end.x - pad, WORLD.end.x - pad))
-	b.pos.y = clampf(b.pos.y, maxf(view.position.y + pad, WORLD.position.y + pad),
-		minf(view.end.y - pad, _lava_top() - pad))
-
-
-## The boss hovers above the player, bobbing, and lobs volleys at them.
-func _update_boss(dt: float) -> void:
-	var b: Boss = boss
-	if b == null:
-		return
-	b.phase += dt
-	b.core += dt * 2.6
-	b.flash = maxf(0.0, b.flash - dt * 3.0)
-	b.slow_cd = maxf(0.0, b.slow_cd - dt)
-	var want := Vector2(
-		clampf(ball_pos.x, WORLD.position.x + 240.0, WORLD.end.x - 240.0),
-		clampf(ball_pos.y - 320.0, WORLD.position.y + 220.0, _lava_top() - 240.0))
-	want.y += sin(b.phase * 1.3) * 38.0
-	b.pos = b.pos.lerp(want, 1.0 - exp(-1.4 * dt))
-	_clamp_boss_to_view(b)
-	b.shot_cd -= dt
-	if b.shot_cd <= 0.0:
-		b.shot_cd = 2.3
-		_boss_volley(b)
-
-
-func _boss_volley(b: Boss) -> void:
-	var aim: Vector2 = (ball_pos - b.pos).normalized()
-	if aim.length_squared() < 0.01:
-		aim = Vector2.DOWN
-	for k in 3:
-		var spread: float = (k - 1) * 0.26
-		var s := BossShot.new()
-		s.pos = b.pos + aim.rotated(spread) * (b.radius + 10.0)
-		s.vel = aim.rotated(spread) * BOSS_SHOT_SPEED
-		s.life = BOSS_SHOT_LIFE
-		s.phase = randf() * TAU
-		boss_shots.append(s)
-	_sfx("shoot_low", 0.12, -14.0)
-
-
-## Volley shots drift at the ball: a fast ball knocks them away, a slow one dies.
-func _update_boss_shots(dt: float) -> void:
-	var spd := ball_vel.length()
-	for i in range(boss_shots.size() - 1, -1, -1):
-		var s = boss_shots[i]
-		s.pos += s.vel * dt
-		s.life -= dt
-		s.phase += dt * 5.0
-		if s.life <= 0.0:
-			boss_shots.remove_at(i)
-			continue
-		if (s.pos.x < WORLD.position.x + s.radius or s.pos.x > WORLD.end.x - s.radius
-				or s.pos.y < WORLD.position.y + s.radius or s.pos.y > _lava_top() - s.radius):
-			boss_shots.remove_at(i)
-			continue
-		var reach: float = BALL_R + s.radius
-		if ball_pos.distance_squared_to(s.pos) < reach * reach:
-			boss_shots.remove_at(i)
-			if spd >= BOSS_DEFLECT_SPEED:
-				score += 60
-				_popup(s.pos, "DEFLECT", GOLD, 16)
-				_burst(s.pos, GOLD, 10, 250.0)
-				_shards(s.pos, -s.vel, GOLD, 6, 330.0, 0.5)
-				_sfx("bump", 0.1, -8.0)
-			else:
-				_blast_death()
-				return
-
-
-## Ball vs boss. Only a fast impact hurts it; anything slower just bounces.
-func _collide_boss() -> void:
-	var b: Boss = boss
-	if b == null:
-		return
-	var d: Vector2 = ball_pos - b.pos
-	var rr: float = b.radius + BALL_R
-	var dist2 := d.length_squared()
-	if dist2 >= rr * rr:
-		return
-	var n := d.normalized() if dist2 > 0.0001 else Vector2.RIGHT
-	ball_pos = b.pos + n * rr
-	var speed := ball_vel.length()
-	var vn := ball_vel.dot(n)
-	if vn < 0.0:
-		ball_vel -= 1.85 * vn * n
-	ball_vel.y = minf(ball_vel.y - RICOCHET_LIFT * 0.7, -RICOCHET_LIFT * 0.4)
-	_clamp_speed()
-	shot_ready = true
-	if speed < BOSS_HIT_SPEED and overdrive_t <= 0.0:
-		if b.slow_cd <= 0.0:
-			b.slow_cd = 0.6
-			_popup(b.pos + Vector2(0.0, -b.radius - 16.0), "NEED SPEED", RED, 16)
-			_burst(ball_pos - n * BALL_R, Color(0.9, 0.35, 0.3), 6, 150.0)
-			shake = maxf(shake, 3.0)
-			_sfx("armor", 0.1, -10.0)
-		return
-	b.hp -= 1
-	b.flash = 1.0
-	score += 350
-	time_left = minf(time_left + 1.6, TIME_CAP)
-	_burst(b.pos + n * b.radius, GOLD, 16, 330.0)
-	_shards(b.pos + n * b.radius, ball_vel, GOLD, 10, 520.0, 0.6)
-	_popup(b.pos + Vector2(0.0, -b.radius - 18.0), "HIT", GOLD, 20)
-	shake = maxf(shake, 10.0)
-	hitstop = 0.06
-	bloom_level = minf(bloom_level + 0.5, 1.8)
-	_sfx("kill", 0.1, -6.0)
-	if b.hp <= 0:
-		_boss_defeated()
-
-
-func _boss_defeated() -> void:
-	var at: Vector2 = boss.pos
-	boss = null
-	boss_shots.clear()
-	boss_beaten += 1
-	boss_next_score = score + BOSS_NEXT_SCORE + boss_beaten * 1500
-	score += 1800
-	time_left = minf(time_left + 10.0, TIME_CAP)
-	_banner("BOSS DOWN")
-	_ring(at, GOLD, 24, 460.0)
-	_burst(at, GOLD, 30, 420.0)
-	_burst(at, WHITE, 14, 260.0)
-	_burst(at, PINK, 18, 340.0)
-	shake = 18.0
-	hitstop = 0.08
-	bloom_level = 1.8
-	_sfx("wave", 0.0, -4.0)
-	_spawn_powerup(at + Vector2(-60.0, 40.0))
-	_spawn_powerup(at + Vector2(60.0, 40.0))
-
-
-## A volley shot connected with a ball that was not fast enough to deflect it.
-func _blast_death() -> void:
-	died_by_blast = true
-	ball_vel = Vector2.ZERO
-	_burst(ball_pos, Color(1.0, 0.55, 0.2), 26, 420.0)
-	_burst(ball_pos, RED, 16, 300.0)
-	_sfx("kill", 0.12, -4.0)
-	_game_over()
 
 
 # ------------------------------------------------------------------ simulation
@@ -1128,8 +807,6 @@ func _update_play(delta: float) -> void:
 		return
 
 	ready_nudge_t = maxf(0.0, ready_nudge_t - delta)
-	rapid_t = maxf(0.0, rapid_t - delta)
-	overdrive_t = maxf(0.0, overdrive_t - delta)
 
 	if charging:
 		charge_t = minf(charge_t + delta, CHARGE_TIME)
@@ -1146,11 +823,6 @@ func _update_play(delta: float) -> void:
 	ball_vel *= pow(SPEED_RETAIN, wdt)
 
 	_step_ball(wdt)
-	if mode != "play":
-		return
-	_update_powerups(wdt)
-	_update_boss(wdt)
-	_update_boss_shots(wdt)
 	if mode != "play":
 		return
 	_update_targets(wdt)
@@ -1203,7 +875,6 @@ func _step_ball(dt: float) -> void:
 		_collide_walls()
 		_collide_bumpers()
 		_collide_targets()
-		_collide_boss()
 		if mode != "play":
 			return
 	_update_ball_motes(dt)
@@ -1280,7 +951,7 @@ func _collide_targets() -> void:
 		if dist2 >= rr * rr:
 			continue
 		var n := d.normalized() if dist2 > 0.0001 else Vector2.RIGHT
-		if overdrive_t > 0.0 or speed >= tg.req:
+		if speed >= tg.req:
 			shot_ready = true
 			# Shattering a ball ricochets you off its surface instead of passing
 			# through, so a fast shot keeps chaining around the arena.
@@ -1401,27 +1072,19 @@ func _emit(pos: Vector2, vel: Vector2, color: Color, size: float, life: float,
 
 
 func _cap_particles() -> void:
-	if particles.size() > 320:
-		particles = particles.slice(particles.size() - 320)
+	if particles.size() > 700:
+		particles = particles.slice(particles.size() - 700)
 
 
 func _update_particles(dt: float) -> void:
-	# Compact in place instead of remove_at (which shifts the tail every time),
-	# and resolve the common drag value once rather than once per particle.
-	var drag_default := pow(0.02, dt)
-	var keep := 0
-	for i in particles.size():
+	for i in range(particles.size() - 1, -1, -1):
 		var p = particles[i]
 		p.vel.y += p.gy * dt
 		p.pos += p.vel * dt
-		p.vel *= drag_default if p.drag == 0.02 else pow(p.drag, dt)
+		p.vel *= pow(p.drag, dt)
 		p.life -= dt
-		if p.life > 0.0:
-			if keep != i:
-				particles[keep] = p
-			keep += 1
-	if keep != particles.size():
-		particles.resize(keep)
+		if p.life <= 0.0:
+			particles.remove_at(i)
 
 
 ## Fine sparks streaming off a fast-moving ball.
@@ -1484,17 +1147,12 @@ func _popup(at: Vector2, text: String, color: Color, size: int) -> void:
 
 
 func _update_popups(dt: float) -> void:
-	var keep := 0
-	for i in popups.size():
+	for i in range(popups.size() - 1, -1, -1):
 		var p = popups[i]
 		p.pos.y -= 44.0 * dt
 		p.life -= dt
-		if p.life > 0.0:
-			if keep != i:
-				popups[keep] = p
-			keep += 1
-	if keep != popups.size():
-		popups.resize(keep)
+		if p.life <= 0.0:
+			popups.remove_at(i)
 
 
 # ------------------------------------------------------------------ rendering
@@ -1513,11 +1171,8 @@ func _draw() -> void:
 	_draw_lava()
 	_draw_bumpers()
 	_draw_targets()
-	_draw_boss()
-	_draw_boss_shots()
 	if charging and mode == "play":
 		_draw_aim()
-	_draw_powerups()
 	_draw_particles()
 	_draw_ball()
 	_draw_popups()
@@ -1533,8 +1188,6 @@ func _draw() -> void:
 		_draw_title()
 	elif mode == "over":
 		_draw_game_over()
-	if show_stats:
-		_draw_stats()
 
 
 func _draw_world_floor() -> void:
@@ -1729,6 +1382,7 @@ func _draw_targets() -> void:
 					var root: Vector2 = tg.pos + out * (r * 0.88)
 					var prong: Vector2 = tg.pos + out * (r + SPIKE_LEN)
 					draw_colored_polygon(PackedVector2Array([prong, root + side_w, root - side_w]), rc)
+					draw_line(root, prong, Color(1.0, 0.95, 0.85, 0.35 * fade), 1.0, true)
 				draw_arc(tg.pos, r * 0.55, 0.0, TAU, 16,
 					Color(base.r, base.g, base.b, 0.55 * fade), 2.0, true)
 			"chaser":
@@ -1743,78 +1397,6 @@ func _draw_targets() -> void:
 				for k in 2:
 					draw_circle(tg.pos - d * r * (0.42 + k * 0.34), 1.8,
 						Color(1.0, 1.0, 1.0, (0.34 - k * 0.12) * fade))
-
-
-## Pickups waiting to be grabbed by the ball.
-func _draw_powerups() -> void:
-	var vis := _view_rect().grow(CULL_MARGIN)
-	for p in powerups:
-		if not vis.has_point(p.pos):
-			continue
-		# Blink through the last seconds so the fade is readable.
-		if p.life < 3.0 and fmod(p.life, 0.5) < 0.2:
-			continue
-		var c := _powerup_color(p.kind)
-		var pulse := 0.5 + 0.5 * sin(t * 3.4 + p.phase)
-		draw_circle(p.pos, 19.0 + pulse * 4.0, Color(c.r, c.g, c.b, 0.09))
-		draw_circle(p.pos, 13.0, Color(0.03, 0.05, 0.10, 0.88))
-		draw_arc(p.pos, 13.0, 0.0, TAU, 20, Color(c.r, c.g, c.b, 0.9), 2.0, true)
-		match p.kind:
-			"time":
-				draw_arc(p.pos, 7.5, 0.0, TAU, 16, Color(c.r, c.g, c.b, 0.55), 1.5, true)
-				draw_line(p.pos, p.pos + Vector2(0.0, -5.5), c, 1.6, true)
-				draw_line(p.pos, p.pos + Vector2(4.0, 1.5), c, 1.6, true)
-			"rapid":
-				for k in 3:
-					draw_circle(p.pos + Vector2(0.0, -4.5 + k * 4.5), 2.0, c)
-			_:
-				var pts := PackedVector2Array()
-				for k in 8:
-					var a: float = p.phase + k * TAU / 8.0
-					var rr := 8.5 if k % 2 == 0 else 3.4
-					pts.append(p.pos + Vector2(cos(a), sin(a)) * rr)
-				draw_colored_polygon(pts, c)
-
-
-## The boss: dark armour plates around a molten core, with hp pips on the rim.
-func _draw_boss() -> void:
-	var b: Boss = boss
-	if b == null:
-		return
-	if not _view_rect().grow(CULL_MARGIN + 120.0).has_point(b.pos):
-		return
-	var f: float = clampf(b.flash, 0.0, 1.0)
-	var r: float = b.radius * (1.0 + sin(t * 2.0) * 0.02)
-	draw_circle(b.pos, r + 42.0 + f * 24.0, Color(1.0, 0.22, 0.32, 0.05 + f * 0.08))
-	draw_circle(b.pos, r, Color(0.09, 0.05, 0.10, 0.98))
-	draw_circle(b.pos, r * 0.88, Color(0.22, 0.08, 0.13, 0.98))
-	for k in 6:
-		var a: float = b.phase * 0.8 + k * TAU / 6.0
-		var out := Vector2(cos(a), sin(a))
-		var root: Vector2 = b.pos + out * (r * 0.70)
-		var tip: Vector2 = b.pos + out * (r + 12.0 + f * 10.0)
-		var side := out.orthogonal() * (r * 0.26)
-		var plate := Color(0.62, 0.14, 0.24, 0.95).lerp(WHITE, f)
-		draw_colored_polygon(PackedVector2Array([tip, root + side, root - side]), plate)
-	draw_circle(b.pos, r * 0.44 + sin(b.core) * 3.0, Color(1.5, 0.45, 0.18, 0.95))
-	draw_circle(b.pos, r * 0.24, Color(2.4, 1.5, 0.75, 0.98))
-	for k in b.max_hp:
-		var a: float = -PI * 0.5 + k * TAU / float(maxi(b.max_hp, 1))
-		var at: Vector2 = b.pos + Vector2(cos(a), sin(a)) * (r + 31.0)
-		draw_circle(at, 3.4, GOLD if k < b.hp else Color(0.34, 0.10, 0.14, 0.75))
-
-
-## Ember volleys in flight.
-func _draw_boss_shots() -> void:
-	var vis := _view_rect().grow(CULL_MARGIN)
-	for s in boss_shots:
-		if not vis.has_point(s.pos):
-			continue
-		draw_circle(s.pos, s.radius + 7.0, Color(1.0, 0.32, 0.22, 0.09))
-		draw_circle(s.pos, s.radius, Color(0.30, 0.05, 0.05, 0.95))
-		draw_circle(s.pos, s.radius * 0.6, Color(1.9, 0.55, 0.2, 0.95))
-		draw_arc(s.pos, s.radius + 3.5, s.phase, s.phase + 2.0, 10,
-			Color(1.0, 0.55, 0.28, 0.7), 2.0, true)
 
 
 ## Charged-shot preview: a ballistic arc stepped with the same forces the ball
@@ -1835,8 +1417,6 @@ func _draw_aim() -> void:
 		return
 
 	for i in n:
-		if i % 2 == 1:
-			continue
 		var pt: Vector2 = path[i]
 		if pt.distance_to(ball_pos) < BALL_R + 13.0:
 			continue
@@ -1874,31 +1454,27 @@ func _predict_arc(v0: Vector2) -> PackedVector2Array:
 	# so the per-step sweep tests a handful of candidates instead of every ball.
 	var reach := v0.length() * 1.5 + 80.0
 	var reach2 := reach * reach
-	arc_bodies.clear()
-	arc_radii.clear()
+	var bodies: Array = []
+	var radii: Array = []
 	for b in bumpers:
 		if b.pos.distance_squared_to(ball_pos) < reach2:
-			arc_bodies.append(b.pos)
-			arc_radii.append(b.radius + BALL_R)
+			bodies.append(b.pos)
+			radii.append(b.radius + BALL_R)
 	for tg in targets:
 		if tg.pos.distance_squared_to(ball_pos) < reach2:
-			arc_bodies.append(tg.pos)
-			arc_radii.append(tg.radius + BALL_R + (SPIKE_LEN if tg.kind == "armored" else 0.0))
-	if boss != null and boss.pos.distance_squared_to(ball_pos) < reach2:
-		arc_bodies.append(boss.pos)
-		arc_radii.append(boss.radius + BALL_R)
-	var drag_step := pow(SPEED_RETAIN, h)
+			bodies.append(tg.pos)
+			radii.append(tg.radius + BALL_R + (SPIKE_LEN if tg.kind == "armored" else 0.0))
 	for i in 90:
 		vel.y += GRAVITY * h
-		vel *= drag_step
+		vel *= pow(SPEED_RETAIN, h)
 		pos += vel * h
 		pts.append(pos)
 		if pos.x < min_x or pos.x > max_x or pos.y < min_y or pos.y > surface:
 			break
 		var blocked := false
-		for k in arc_bodies.size():
-			var gap: float = arc_radii[k]
-			if pos.distance_squared_to(arc_bodies[k]) < gap * gap:
+		for k in bodies.size():
+			var gap: float = radii[k]
+			if pos.distance_squared_to(bodies[k]) < gap * gap:
 				blocked = true
 				break
 		if blocked:
@@ -1930,7 +1506,6 @@ func _draw_ball() -> void:
 			draw_circle(ball_pos, BALL_R + 5.0, Color(col.r, col.g, col.b, 0.08))
 
 
-## Particles are 2-9 px sparks: quads tessellate far cheaper than circle fans.
 func _draw_particles() -> void:
 	var vis := _view_rect().grow(CULL_MARGIN)
 	for p in particles:
@@ -1939,9 +1514,7 @@ func _draw_particles() -> void:
 		var a := clampf(p.life / p.max_life, 0.0, 1.0)
 		if a <= 0.0:
 			continue
-		var sz: float = p.size * (0.4 + a * 0.6)
-		draw_rect(Rect2(p.pos - Vector2(sz, sz), Vector2(sz, sz) * 2.0),
-			Color(p.color.r, p.color.g, p.color.b, a))
+		draw_circle(p.pos, p.size * (0.4 + a * 0.6), Color(p.color.r, p.color.g, p.color.b, a))
 
 
 func _draw_popups() -> void:
@@ -1977,15 +1550,8 @@ func _draw_hud() -> void:
 	_text("SCORE", Vector2(48.0, 28.0), 11, DIM)
 	_text(str(score), Vector2(48.0, 56.0), 26, WHITE, true)
 	if mode == "play":
-		var sy := 82.0
-		_text("SHOT READY" if shot_ready else "HIT A BALL TO RELOAD", Vector2(48.0, sy), 12,
+		_text("SHOT READY" if shot_ready else "HIT A BALL TO RELOAD", Vector2(48.0, 82.0), 12,
 			CYAN if shot_ready else RED)
-		if rapid_t > 0.0:
-			sy += 20.0
-			_text("RAPID  %.1fs" % rapid_t, Vector2(48.0, sy), 12, CYAN)
-		if overdrive_t > 0.0:
-			sy += 20.0
-			_text("OVERDRIVE  %.1fs" % overdrive_t, Vector2(48.0, sy), 12, PINK)
 
 	_text_right("SMASHED", Vector2(1232.0, 28.0), 11, DIM)
 	_text_right(str(kills), Vector2(1232.0, 56.0), 26, WHITE, true)
@@ -2015,23 +1581,6 @@ func _draw_hud() -> void:
 		_text_center_at(Vector2(640.0, 300.0), banner, 54,
 			Color(0.85, 0.98, 1.0, a), bold_font)
 
-	if mode == "play" and boss != null:
-		_draw_boss_bar()
-
-
-func _draw_boss_bar() -> void:
-	var b: Boss = boss
-	if b == null:
-		return
-	var bw := 520.0
-	var bx := 640.0 - bw * 0.5
-	var by := 84.0
-	_text_center_at(Vector2(640.0, by - 8.0), "THE WARDEN", 14, GOLD, bold_font)
-	draw_rect(Rect2(bx - 3.0, by, bw + 6.0, 12.0), Color(0.02, 0.03, 0.06, 0.75))
-	var p := clampf(float(b.hp) / float(maxi(b.max_hp, 1)), 0.0, 1.0)
-	if p > 0.0:
-		draw_rect(Rect2(bx, by + 3.0, bw * p, 6.0), Color(1.0, 0.28, 0.34).lerp(GOLD, p))
-
 
 ## Corner map so you can see the balls waiting beyond the screen edge.
 func _draw_minimap() -> void:
@@ -2048,14 +1597,6 @@ func _draw_minimap() -> void:
 	for tg in targets:
 		draw_circle(mm.position + (tg.pos - WORLD.position) * sc, 1.8,
 			Color(tg.color.r, tg.color.g, tg.color.b, 0.85))
-	for p in powerups:
-		var pc := _powerup_color(p.kind)
-		draw_circle(mm.position + (p.pos - WORLD.position) * sc, 2.4,
-			Color(pc.r, pc.g, pc.b, 0.95))
-	if boss != null:
-		var bpos: Vector2 = mm.position + (boss.pos - WORLD.position) * sc
-		draw_circle(bpos, 5.0, Color(1.0, 0.30, 0.30, 0.95))
-		draw_arc(bpos, 7.5, 0.0, TAU, 14, Color(1.0, 0.45, 0.45, 0.7), 1.5, true)
 	draw_rect(Rect2(mm.position.x, mm.position.y + (_lava_top() - WORLD.position.y) * sc.y,
 		mm.size.x, LAVA_H * sc.y), Color(1.0, 0.45, 0.10, 0.55))
 
@@ -2097,8 +1638,6 @@ func _draw_game_over() -> void:
 	var headline := "TIME'S UP"
 	if died_on_spikes:
 		headline = "IMPALED"
-	elif died_by_blast:
-		headline = "BLASTED"
 	elif died_in_lava:
 		headline = "MELTED"
 	_text_center_at(Vector2(640.0, 250.0), headline, 68, PINK, bold_font)
@@ -2111,25 +1650,6 @@ func _draw_game_over() -> void:
 		_text_center_at(Vector2(640.0, 486.0), "BEST  %d" % best, 16, DIM)
 	var pulse := 0.6 + 0.4 * sin(t * 4.0)
 	_text_center_at(Vector2(640.0, 572.0), "CLICK TO PLAY AGAIN", 20, Color(0.85, 0.97, 1.0, pulse))
-
-
-## F3 overlay: frame rate, renderer workload and script time.
-func _draw_stats() -> void:
-	var win := DisplayServer.window_get_size()
-	var lines := [
-		"FPS %d" % Engine.get_frames_per_second(),
-		"draws %d" % int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)),
-		"prims %d" % int(Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)),
-		"proc %.1f ms" % (Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0),
-		"phys %.1f ms" % (Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0),
-		"particles %d" % particles.size(),
-		"glow %s" % ("on" if glow_env != null and glow_env.glow_enabled else "off"),
-		"window %dx%d" % [win.x, win.y],
-	]
-	var y := 134.0
-	for s in lines:
-		_text(s, Vector2(48.0, y), 12, GREEN)
-		y += 16.0
 
 
 # ------------------------------------------------------------------ text helpers
