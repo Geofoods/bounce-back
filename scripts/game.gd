@@ -1416,9 +1416,15 @@ func _draw_aim() -> void:
 	if tip.distance_to(ball_pos) < BALL_R + 12.0:
 		return
 
-	for i in n:
+	# Two dozen dots read the same as ninety, and every draw_circle is its own
+	# command, so stride the path rather than emitting one per sample.
+	var skip := maxi(1, int(ceil(float(n) / 26.0)))
+	var clear2 := (BALL_R + 13.0) * (BALL_R + 13.0)
+	for i in range(0, n, skip):
 		var pt: Vector2 = path[i]
-		if pt.distance_to(ball_pos) < BALL_R + 13.0:
+		var dx: float = pt.x - ball_pos.x
+		var dy: float = pt.y - ball_pos.y
+		if dx * dx + dy * dy < clear2:
 			continue
 		var u := float(i) / float(n)
 		draw_circle(pt, lerpf(2.8, 1.1, u), Color(0.55, 0.95, 1.0, lerpf(0.52, 0.12, u)))
@@ -1446,35 +1452,48 @@ func _predict_arc(v0: Vector2) -> PackedVector2Array:
 	var pos := ball_pos
 	var vel := v0
 	var h := 1.0 / 60.0
+	# The step never changes, so the decay and the gravity kick fold into two
+	# constants instead of being resolved in all 90 steps.
+	var drag_step := pow(SPEED_RETAIN, h)
+	var gravity_step := GRAVITY * h
 	var surface := _lava_top() - BALL_R
 	var min_x := WORLD.position.x + BALL_R
 	var max_x := WORLD.end.x - BALL_R
 	var min_y := WORLD.position.y + BALL_R
 	# Bodies further away than the shot can possibly travel are dropped up front,
-	# so the per-step sweep tests a handful of candidates instead of every ball.
+	# and the survivors are flattened into typed arrays. The sweep below touches
+	# them thousands of times per frame while a shot is charged, and packed float
+	# access is far cheaper than untyped Array elements and a method call each.
 	var reach := v0.length() * 1.5 + 80.0
 	var reach2 := reach * reach
-	var bodies: Array = []
-	var radii: Array = []
+	var bx := PackedFloat32Array()
+	var by := PackedFloat32Array()
+	var rr := PackedFloat32Array()
 	for b in bumpers:
 		if b.pos.distance_squared_to(ball_pos) < reach2:
-			bodies.append(b.pos)
-			radii.append(b.radius + BALL_R)
+			bx.append(b.pos.x)
+			by.append(b.pos.y)
+			var bg: float = b.radius + BALL_R
+			rr.append(bg * bg)
 	for tg in targets:
 		if tg.pos.distance_squared_to(ball_pos) < reach2:
-			bodies.append(tg.pos)
-			radii.append(tg.radius + BALL_R + (SPIKE_LEN if tg.kind == "armored" else 0.0))
+			bx.append(tg.pos.x)
+			by.append(tg.pos.y)
+			var tgap: float = tg.radius + BALL_R + (SPIKE_LEN if tg.kind == "armored" else 0.0)
+			rr.append(tgap * tgap)
+	var count := bx.size()
 	for i in 90:
-		vel.y += GRAVITY * h
-		vel *= pow(SPEED_RETAIN, h)
+		vel.y += gravity_step
+		vel *= drag_step
 		pos += vel * h
 		pts.append(pos)
 		if pos.x < min_x or pos.x > max_x or pos.y < min_y or pos.y > surface:
 			break
 		var blocked := false
-		for k in bodies.size():
-			var gap: float = radii[k]
-			if pos.distance_squared_to(bodies[k]) < gap * gap:
+		for k in count:
+			var dx: float = pos.x - bx[k]
+			var dy: float = pos.y - by[k]
+			if dx * dx + dy * dy < rr[k]:
 				blocked = true
 				break
 		if blocked:
