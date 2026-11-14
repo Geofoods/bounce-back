@@ -14,6 +14,7 @@ const CAM_LERP := 4.6            # camera follow stiffness (higher = tighter)
 const CAM_LOOKAHEAD := 0.26      # how far ahead of the ball the camera leads
 const TARGET_POP := 34           # live balls streamed around the camera
 const BUMPER_POP := 26           # static bumpers spread across the world
+const MIN_VISIBLE := 5           # always keep at least this many balls on screen
 
 # Balls are spawned this far outside the screen and unloaded once they are
 # further away than STREAM_KEEP, so only nearby balls exist at any time.
@@ -26,6 +27,7 @@ const START_TIME := 32.0         # seconds on the clock at the start
 const TIME_PER_KILL := 2.4       # seconds added per ball broken
 const TIME_CAP := 48.0           # clock can never exceed this
 
+const GRAVITY := 1000.0          # downward pull on the ball (px/s²)
 const WALL_REST := 0.97          # energy kept when bouncing off a wall
 const BUMPER_REST := 1.06        # bumpers add a little energy (pinball feel)
 const SPEED_RETAIN := 0.87       # fraction of speed kept each second
@@ -65,6 +67,7 @@ class Target:
 	var flash: float = 0.0
 	var slow_cd: float = 0.0
 	var spin: float = 0.0
+	var age: float = 0.0
 
 class Particle:
 	var pos: Vector2
@@ -456,16 +459,47 @@ func _update_streaming(dt: float) -> void:
 		return
 	stream_t = STREAM_INTERVAL
 
-	var keep := _view_rect().grow(STREAM_KEEP)
+	var view := _view_rect()
+	var keep := view.grow(STREAM_KEEP)
 	for i in range(targets.size() - 1, -1, -1):
 		if not keep.has_point(targets[i].pos):
 			targets.remove_at(i)
 
+	var visible := 0
+	for tg in targets:
+		if view.has_point(tg.pos):
+			visible += 1
+
 	var guard := 0
-	while targets.size() < TARGET_POP and guard < 24:
+	while guard < 24:
 		guard += 1
+		# Always leave something to shoot at; otherwise refill off screen.
+		if visible < MIN_VISIBLE:
+			if targets.size() >= TARGET_POP:
+				_remove_farthest()
+			if _spawn_target(false, view.grow(-70.0)):
+				visible += 1
+				continue
+		if targets.size() >= TARGET_POP:
+			break
 		if not _spawn_target(true, _stream_area()):
 			break
+
+
+## Drops the most distant off-screen ball so a new on-screen one can load.
+func _remove_farthest() -> void:
+	var view := _view_rect()
+	var best := -1
+	var best_d := -1.0
+	for i in targets.size():
+		if view.has_point(targets[i].pos):
+			continue
+		var d: float = targets[i].pos.distance_squared_to(cam)
+		if d > best_d:
+			best_d = d
+			best = i
+	if best >= 0:
+		targets.remove_at(best)
 
 
 func _spawn_target(offscreen: bool, area: Rect2) -> bool:
@@ -550,9 +584,7 @@ func _kill_target(idx: int, speed: float) -> void:
 	shake = maxf(shake, 9.0)
 	hitstop = 0.055
 	_sfx("kill", 0.08, -6.0)
-	# Keep the nearby ring stocked, preferring spots you cannot see yet.
-	if targets.size() < TARGET_POP:
-		_spawn_target(true, _stream_area())
+	# Streaming refills the population shortly after the kill.
 
 
 # ------------------------------------------------------------------ simulation
@@ -614,6 +646,8 @@ func _update_camera(dt: float) -> void:
 
 
 func _update_title_ball(dt: float) -> void:
+	ball_vel.y += GRAVITY * dt
+	_clamp_speed()
 	if ball_vel.length() < 80.0:
 		ball_vel = Vector2.RIGHT.rotated(randf() * TAU) * 280.0
 	ball_pos += ball_vel * dt
@@ -662,6 +696,7 @@ func _update_targets(dt: float) -> void:
 	for tg in targets:
 		tg.phase += dt * 2.0
 		tg.spin += dt * (2.4 if tg.kind == "chaser" else 1.1)
+		tg.age += dt
 		tg.flash = maxf(0.0, tg.flash - dt * 5.0)
 		tg.slow_cd = maxf(0.0, tg.slow_cd - dt)
 
@@ -691,6 +726,8 @@ func _step_ball(dt: float) -> void:
 	var steps := clampi(int(ceil(speed * dt / (BALL_R * 0.5))), 1, 12)
 	var h := dt / float(steps)
 	for i in steps:
+		ball_vel.y += GRAVITY * h
+		_clamp_speed()
 		ball_pos += ball_vel * h
 		_collide_walls()
 		_collide_bumpers()
@@ -962,46 +999,49 @@ func _draw_targets() -> void:
 	for tg in targets:
 		if not vis.has_point(tg.pos):
 			continue
+		var fade := clampf(tg.age / 0.22, 0.0, 1.0)
 		var pulse := 1.0 + sin(t * 3.0 + tg.phase) * 0.045
 		var r: float = tg.radius * pulse
 		var base: Color = tg.color
 		var f: float = clampf(tg.flash, 0.0, 1.0)
 
-		draw_circle(tg.pos, r + 14.0, Color(base.r, base.g, base.b, 0.045 + f * 0.10))
+		draw_circle(tg.pos, r + 14.0, Color(base.r, base.g, base.b, (0.045 + f * 0.10) * fade))
 		# glossy sphere body
-		draw_circle(tg.pos, r, Color(base.r * 0.35, base.g * 0.35, base.b * 0.35, 0.98))
+		draw_circle(tg.pos, r, Color(base.r * 0.35, base.g * 0.35, base.b * 0.35, 0.98 * fade))
 		draw_circle(tg.pos + Vector2(-r * 0.10, -r * 0.10), r * 0.86,
-			Color(base.r * 0.62, base.g * 0.62, base.b * 0.62, 0.95))
+			Color(base.r * 0.62, base.g * 0.62, base.b * 0.62, 0.95 * fade))
 		draw_circle(tg.pos + Vector2(-r * 0.26, -r * 0.26), r * 0.36,
-			Color(1.0, 1.0, 1.0, 0.42 + f * 0.4))
-		draw_arc(tg.pos, r, 0.0, TAU, 40, Color(base.r, base.g, base.b, 0.9), 2.0 + f * 3.0, true)
+			Color(1.0, 1.0, 1.0, (0.42 + f * 0.4) * fade))
+		draw_arc(tg.pos, r, 0.0, TAU, 32, Color(base.r, base.g, base.b, 0.9 * fade),
+			2.0 + f * 3.0, true)
 
 		match tg.kind:
 			"basic":
 				for k in 3:
 					var a: float = tg.spin + k * TAU / 3.0
 					draw_circle(tg.pos + Vector2(cos(a), sin(a)) * r * 0.55, 2.0,
-						Color(1.0, 0.85, 0.95, 0.55))
+						Color(1.0, 0.85, 0.95, 0.55 * fade))
 			"armored":
 				var ready: bool = charged and power >= tg.req
 				var rc := GREEN if ready else Color(1.0, 0.62, 0.22, 0.60)
+				rc.a *= fade
 				for k in 8:
 					var a0 := t * 1.2 + k * TAU / 8.0
 					draw_arc(tg.pos, r + 9.0, a0, a0 + 0.30, 6, rc, 3.0, true)
 				draw_arc(tg.pos, r * 0.55, 0.0, TAU, 24,
-					Color(base.r, base.g, base.b, 0.55), 2.0, true)
+					Color(base.r, base.g, base.b, 0.55 * fade), 2.0, true)
 			"chaser":
 				var dir: Vector2 = (ball_pos - tg.pos).normalized()
 				var side: Vector2 = dir.orthogonal() * r * 0.42
 				var tip: Vector2 = tg.pos + dir * r * 0.55
 				var back: Vector2 = tg.pos - dir * r * 0.34
 				draw_colored_polygon(PackedVector2Array([tip, back + side, back - side]),
-					Color(1.0, 0.95, 1.0, 0.72))
+					Color(1.0, 0.95, 1.0, 0.72 * fade))
 			"drifter":
 				var d: Vector2 = tg.vel.normalized()
 				for k in 2:
 					draw_circle(tg.pos - d * r * (0.42 + k * 0.34), 1.8,
-						Color(1.0, 1.0, 1.0, 0.34 - k * 0.12))
+						Color(1.0, 1.0, 1.0, (0.34 - k * 0.12) * fade))
 
 
 ## Straight aim line only — no bounce prediction.
