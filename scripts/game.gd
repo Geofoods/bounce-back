@@ -12,6 +12,7 @@ const VIEW := Vector2(1280.0, 720.0)
 const WORLD := Rect2(0.0, 0.0, 3840.0, 2560.0)   # ~9 screens of playfield
 const BALL_R := 15.0
 const LIGHT_RADIUS := 720.0  # how far your ball's lamp reaches (world units)
+const WORLD_SCALE := 1.0 / 1.2  # game speed factor: <1 = slower
 
 const CAM_LERP := 4.6            # camera follow stiffness (higher = tighter)
 const CAM_LOOKAHEAD := 0.26      # how far ahead of the ball the camera leads
@@ -43,7 +44,7 @@ const SPIKE_LEN := 14.0          # how far the spiked balls' points poke out
 const MIN_POWER := 560.0         # launch speed of a tap
 const MAX_POWER := 2050.0        # launch speed of a full charge
 const CHARGE_TIME := 0.7         # seconds to reach full charge
-const SLOWMO := 0.30             # world speed while charging
+const SLOWMO := 0.39             # world speed while charging (1.3x slower than original 0.30)
 const KILL_SPEED := 240.0        # minimum impact speed for basic targets
 
 # Boss: wakes at BOSS_SCORE, lumbers at the ball, spits plasma.
@@ -92,7 +93,7 @@ const BALL_NAMES := ["CYAN", "PINK", "VERITY", "GREEN", "PURPLE"]
 # Photo ball skins: circular portraits drawn over the ball.
 const BALL_FACE_PATHS := ["res://images (2)-modified.png", "res://Kai_Cenat-modified.png", "res://LacyHimself-modified.png", "res://Rayasianboy_2025-modified.png", "res://OIP (17)-modified.png"]
 const BALL_FACE_NAMES := ["MARLON", "KAI", "LACY", "RAY", "RAKAI"]
-const HOST_QR_PATH := "res://bing_generated_qrcode.png"
+const HOST_QR_PATH := "res://bing_generated_qrcode (1).png"
 const SETTINGS_LABELS := ["MOBILE CONTROLS", "TRAIL", "SHAKE", "GLOW", "SOUND"]
 const CUSTOM_ARROW_L := Rect2(36.0, 330.0, 64.0, 64.0)
 const CUSTOM_ARROW_R := Rect2(1180.0, 330.0, 64.0, 64.0)
@@ -399,15 +400,23 @@ func _setup_host_qr() -> void:
 ## name + address boxes are LineEdits skinned to match the lobby. They float
 ## over the drawn panels; _update_net_edits() shows, hides and places them.
 func _setup_net_edits() -> void:
+	# Real text fields for the net screens. Hand-rolled key handling can't pop
+	# a mobile keyboard, accept lowercase/paste, or repeat properly, so the
+	# name + address boxes are LineEdits skinned to match the lobby. They float
+	# over the drawn panels; _update_net_edits() shows, hides and places them.
+	# On phone, mobile_kb grabs focus so the OS text keyboard comes up.
+	var on_mobile := OS.has_feature("web") or OS.get_name() == "Android" or OS.get_name() == "iOS"
 	name_edit = LineEdit.new()
 	name_edit.placeholder_text = "YOU"
 	name_edit.max_length = 12
 	name_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
 	name_edit.context_menu_enabled = true
+	name_edit.keyboard_visibility_changed.connect(_on_name_editable)
 	name_edit.add_theme_font_override("font", bold_font)
 	name_edit.add_theme_color_override("font_color", WHITE)
 	name_edit.add_theme_color_override("font_placeholder_color", DIM)
 	name_edit.add_theme_color_override("caret_color", CYAN)
+	name_edit.node_filter_input = false
 	_net_edit_boxes(name_edit)
 	name_edit.text_changed.connect(_on_name_changed)
 	name_edit.text_submitted.connect(_on_name_submitted)
@@ -420,10 +429,12 @@ func _setup_net_edits() -> void:
 	ip_edit.max_length = 64
 	ip_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
 	ip_edit.context_menu_enabled = true
+	ip_edit.keyboard_visibility_changed.connect(_on_ip_editable)
 	ip_edit.add_theme_font_override("font", bold_font)
 	ip_edit.add_theme_color_override("font_color", WHITE)
 	ip_edit.add_theme_color_override("font_placeholder_color", DIM)
 	ip_edit.add_theme_color_override("caret_color", CYAN)
+	ip_edit.node_filter_input = false
 	_net_edit_boxes(ip_edit)
 	ip_edit.text_changed.connect(_on_ip_changed)
 	ip_edit.text_submitted.connect(_on_ip_submitted)
@@ -463,6 +474,7 @@ func _update_net_edits() -> void:
 			name_edit.add_theme_font_size_override("font_size", 17 if rect == NET_NAME_RECT_SM else 22)
 			if not name_edit.has_focus() and name_edit.text != duel_my_name:
 				name_edit.text = duel_my_name
+			name_edit.editable = true
 		elif name_edit.has_focus():
 			name_edit.release_focus()
 	if ip_edit != null:
@@ -473,6 +485,7 @@ func _update_net_edits() -> void:
 			ip_edit.add_theme_font_size_override("font_size", 24)
 			if not ip_edit.has_focus() and ip_edit.text != join_ip:
 				ip_edit.text = join_ip
+			ip_edit.editable = true
 		elif ip_edit.has_focus():
 			ip_edit.release_focus()
 
@@ -503,6 +516,16 @@ func _on_name_focus(on: bool) -> void:
 
 func _on_ip_focus(on: bool) -> void:
 	join_focused = on
+
+
+func _on_name_editable(visible: bool) -> void:
+	if name_edit != null:
+		name_edit.editable = true
+
+
+func _on_ip_editable(visible: bool) -> void:
+	if ip_edit != null:
+		ip_edit.editable = true
 
 
 ## Drops focus from both net fields without hiding them (they hide
@@ -815,9 +838,10 @@ func _load_custom() -> void:
 		trail_opt = bool(cfg.get_value("custom", "trail", true))
 		shake_opt = bool(cfg.get_value("custom", "shake", true))
 		glow_opt = bool(cfg.get_value("custom", "glow", true))
-		mobile_controls = bool(cfg.get_value("custom", "mobile", false))
 		muted = bool(cfg.get_value("custom", "muted", false))
 		duel_my_name = _net_clean_name(str(cfg.get_value("custom", "name", "")))
+	mobile_controls = _is_mobile()
+	cfg.set_value("custom", "mobile", mobile_controls)
 
 
 func _save_custom() -> void:
@@ -831,6 +855,10 @@ func _save_custom() -> void:
 	cfg.set_value("custom", "muted", muted)
 	cfg.set_value("custom", "name", duel_my_name)
 	cfg.save("user://bounce_back.cfg")
+
+
+func _is_mobile() -> bool:
+	return OS.has_feature("web") or OS.get_name() == "Android" or OS.get_name() == "iOS"
 
 
 ## Skin helpers by index, so the customize carousel can preview neighbours.
@@ -2805,7 +2833,7 @@ func _update_play(delta: float) -> void:
 		charge_t = minf(charge_t + delta, CHARGE_TIME)
 		_update_charge_motes(delta)
 
-	var wdt := delta * (SLOWMO if charging else 1.0)
+	var wdt := delta * WORLD_SCALE * (SLOWMO if charging else 1.0)
 
 	if combo_t > 0.0:
 		combo_t -= delta
@@ -2855,7 +2883,7 @@ func _update_duel(delta: float) -> void:
 	if charging:
 		charge_t = minf(charge_t + CHARGE_TIME, CHARGE_TIME)
 		_update_charge_motes(delta)
-	var wdt := delta * (SLOWMO if charging else 1.0)
+	var wdt := delta * WORLD_SCALE * (SLOWMO if charging else 1.0)
 	ball_flash = maxf(0.0, ball_flash - wdt * 4.0)
 	var allf := _duel_all()
 	for f in allf:

@@ -25,7 +25,7 @@ godot --path .
 | Release | Fire toward the cursor; hold longer = more power |
 | Space | Same as mouse, for keyboard play |
 | Right mouse / F / Space (with gun) | Shoot equipped gun toward cursor (versus duel) - every shot kicks you backwards |
-| Customize > MOBILE | Fixed shooting joystick in versus (mouse or touch) |
+| Customize > MOBILE | Fixed shooting joystick in versus (mouse or touch). Auto-enabled on phone; auto-disabled on desktop. |
 | Touch: 1 finger | Same as left mouse — hold to charge, release to fire |
 | Touch: gun stick | 2nd finger plants a stick — push to aim, hold to shoot |
 | R | Restart (rematch in versus) |
@@ -110,7 +110,8 @@ const CAM_LOOKAHEAD := 0.26   # how far ahead of the ball it leads
 const MIN_POWER := 470.0      # tap launch speed
 const MAX_POWER := 1750.0     # full charge launch speed
 const CHARGE_TIME := 0.8      # seconds to full charge
-const SLOWMO := 0.30          # world speed while aiming
+const SLOWMO := 0.39          # world speed while aiming (1.3x slower than original 0.30)
+const WORLD_SCALE := 1.0 / 1.2  # game speed factor: <1 = slower (1.2x slower)
 const WALL_REST := 0.97       # wall bounciness
 const BUMPER_REST := 1.06     # >1 means bumpers add speed
 const SPEED_RETAIN := 0.87    # fraction of speed kept each second
