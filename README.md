@@ -37,9 +37,11 @@ godot --path .
 Title → MULTIPLAYER: one player HOSTs, the other JOINs with the host's IP
 (port 7777, or `IP:port` for a custom port). Versus is a duel in a sharedarena: every fighter has 100 HP. Breaking a chest instantly equips
 PISTOL, then SPREAD once armed — no pickup walk-over. Fresh crates drop
-into the arena every few seconds.The molten floor burns fighters that touch it (15 damage per second). Shoot the rivals (RMB or F toward the cursor). Up to 4 players (host + 3) share one arena — knock everyone
+into the arena every few seconds.The molten floor burns fighters that touch it (15 damage per second). Shoot the rivals (RMB or F toward the cursor). Up to 4 fighters share one arena (host + 3 rivals, or 4 rivals if the host sits out) — knock everyone
 else out, or hold the most HP when the 60s clock runs out, to win.
-Knocked-out fighters spectate while the rest finish. Edge arrows point
+If you die while the round goes on, you spectate: the camera follows the
+remaining fighters until someone wins. The host can also sit out entirely
+with the HOST FIGHTS / HOST SPECTATES toggle in the lobby. Edge arrows point
 at off-screen rivals. Pink/green balls also spawn — smashing one
 reloads your launch (gold spiky balls need a fast hit — slow
 touches burn)

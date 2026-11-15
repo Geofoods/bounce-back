@@ -96,6 +96,8 @@ const NET_PORT := 7777
 const BTN_NET := Rect2(644.0, 596.0, 146.0, 40.0)
 const BTN_NET_HOST := Rect2(440.0, 280.0, 400.0, 56.0)
 const BTN_NET_JOIN := Rect2(440.0, 348.0, 400.0, 52.0)
+const BTN_NET_ROLE := Rect2(490.0, 510.0, 300.0, 44.0)
+const BTN_NET_ROLE2 := Rect2(490.0, 360.0, 300.0, 44.0)
 const NET_IP_RECT := Rect2(440.0, 280.0, 400.0, 48.0)
 const GREEN := Color(0.56, 0.97, 0.76)
 const RED := Color(1.0, 0.25, 0.42)
@@ -232,6 +234,7 @@ var join_focused := false
 const DUEL_TIME := 60.0
 const DUEL_HP := 100
 const DUEL_GUN_NAMES := ["FISTS", "PISTOL", "SPREAD"]
+const DUEL_BULLET_R := 10.0  # versus bullet body radius: chunky, easier to read and land
 const DUEL_SNAP_T := 1.0 / 20.0
 const DUEL_CHEST_HP := 25
 const DUEL_CHEST_RESPAWN_T := 5.0   # host drops a fresh crate this often
@@ -249,7 +252,8 @@ var duel_foe_goal := Vector2.ZERO
 var duel_foe_goals: Array = []  # predicted positions, parallel to duel_foes
 var duel_ids: Array = []        # peer ids in fighter order; index 0 is the host
 var duel_my_id: int = 0         # my fighter index into duel_ids order
-var duel_was_alive := true      # tracks my death so elimination banners once
+var duel_was_alive := true  # tracks my death so elimination banners once
+var duel_host_plays := true  # lobby toggle: host fights, or sits out and spectates
 var duel_bullets: Array = []
 var duel_chests: Array = []
 var duel_chest_t := 0.0
@@ -552,7 +556,7 @@ func _net_host_ips() -> Array:
 func _net_host() -> void:
 	_net_leave_quiet()
 	var peer := ENetMultiplayerPeer.new()
-	if peer.create_server(NET_PORT, DUEL_MAX_PLAYERS - 1) != OK:
+	if peer.create_server(NET_PORT, DUEL_MAX_PLAYERS) != OK:
 		net_status = "HOST FAILED"
 		return
 	multiplayer.multiplayer_peer = peer
@@ -623,7 +627,10 @@ func _net_begin(roster: Array = []) -> void:
 ## Ordered peer-id roster for the match: host first, then clients ascending.
 ## Capped at DUEL_MAX_PLAYERS; extra joiners are ignored at start.
 func _duel_roster() -> Array:
-	var ids: Array = [multiplayer.get_unique_id()]
+	# A spectating host stays out of the fighter order; the arena is peers only.
+	var ids: Array = []
+	if duel_host_plays:
+		ids.append(multiplayer.get_unique_id())
 	var peers := multiplayer.get_peers()
 	peers.sort()
 	ids.append_array(peers)
@@ -633,7 +640,11 @@ func _duel_roster() -> Array:
 ## Every fighter dict in roster order; duel_me is duel_all()[duel_my_id].
 ## Dictionaries are shared references, so edits through either stick.
 func _duel_all() -> Array:
-	var all: Array = [duel_me]
+	# A spectating host has no fighter: duel_me is a dead dummy, so the real
+	# fighters are just the foes, already in roster order.
+	var all: Array = []
+	if duel_my_id >= 0:
+		all.append(duel_me)
 	all.append_array(duel_foes)
 	return all
 
@@ -641,6 +652,29 @@ func _duel_all() -> Array:
 ## My fighter index into duel_ids order. Owner tags in bullets match.
 func _duel_role() -> int:
 	return duel_my_id
+
+
+## No live fighter of my own: I died mid-round, or the host is sitting out.
+## Camera, HUD, minimap and my-ball drawing all key off this.
+func _duel_watching() -> bool:
+	return net_mode != "off" and mode == "play" and not duel_over and (duel_my_id < 0 or int(duel_me.get("hp", 0)) <= 0)
+
+
+## First living fighter in arena order for the spectator camera to follow.
+func _duel_watch_target() -> Dictionary:
+	for f in _duel_all():
+		if int((f as Dictionary).get("hp", 0)) > 0:
+			return f
+	return {}
+
+
+## Roster slot -> fighter dict. A fighting host owns slot 0 so rivals shift
+## by one; a spectating host owns no slot and foes sit in roster order.
+func _duel_foe_at(idx: int) -> Dictionary:
+	var o := idx if duel_my_id < 0 else idx - 1
+	if o < 0 or o >= duel_foes.size():
+		return {}
+	return duel_foes[o]
 
 
 func _duel_fighter(pos: Vector2) -> Dictionary:
@@ -654,14 +688,20 @@ func _duel_reset(roster: Array = []) -> void:
 	if roster.is_empty():
 		roster = _duel_roster()
 	duel_ids = roster
-	duel_my_id = maxi(0, duel_ids.find(multiplayer.get_unique_id()))
+	# find() misses when the host sits out: my_id -1 means spectator, no fighter.
+	duel_my_id = duel_ids.find(multiplayer.get_unique_id())
 	var n := duel_ids.size()
 	var c := WORLD.get_center()
 	var all: Array = []
 	for i in n:
 		var ang := TAU * float(i) / float(maxi(n, 1)) - PI * 0.5
 		all.append(_duel_fighter(c + Vector2(cos(ang), sin(ang)) * 650.0))
-	duel_me = all[duel_my_id]
+	if duel_my_id >= 0:
+		duel_me = all[duel_my_id]
+	else:
+		# Spectator dummy: hp 0 keeps it out of sim, snapshots and win checks.
+		duel_me = _duel_fighter(c)
+		duel_me["hp"] = 0
 	duel_foes.clear()
 	duel_foe_goals.clear()
 	for i in n:
@@ -684,7 +724,7 @@ func _duel_reset(roster: Array = []) -> void:
 	duel_snap_t = 0.0
 	duel_over = false
 	duel_winner = -1
-	duel_was_alive = true
+	duel_was_alive = duel_my_id >= 0
 	time_left = DUEL_TIME
 	max_time = DUEL_TIME
 	score = 0
@@ -705,7 +745,10 @@ func _duel_reset(roster: Array = []) -> void:
 	hurt_cd = 0.0
 	cam = ball_pos
 	cam_snap = true
-	_banner("BREAK CHESTS - GRAB GUNS")
+	if duel_my_id >= 0:
+		_banner("BREAK CHESTS - GRAB GUNS")
+	else:
+		_banner("SPECTATING")
 
 
 @rpc("any_peer", "call_remote", "unreliable")
@@ -729,9 +772,9 @@ func _duel_launch(v: Vector2) -> void:
 	if net_mode != "host" or duel_over or mode != "play":
 		return
 	var idx := duel_ids.find(multiplayer.get_remote_sender_id())
-	if idx <= 0 or idx >= 1 + duel_foes.size():
+	var f: Dictionary = _duel_foe_at(idx)
+	if f.is_empty():
 		return
-	var f: Dictionary = duel_foes[idx - 1]
 	if not bool(f.get("ready", true)) or int(f.get("hp", 0)) <= 0 or bool(f.get("gone", false)):
 		return
 	f["ready"] = false
@@ -744,9 +787,9 @@ func _duel_fire(target: Vector2) -> void:
 	if net_mode != "host" or duel_over or mode != "play":
 		return
 	var idx := duel_ids.find(multiplayer.get_remote_sender_id())
-	if idx <= 0 or idx >= 1 + duel_foes.size():
+	var f: Dictionary = _duel_foe_at(idx)
+	if f.is_empty():
 		return
-	var f: Dictionary = duel_foes[idx - 1]
 	if int(f.get("hp", 0)) <= 0 or bool(f.get("gone", false)):
 		return
 	_duel_spawn_shots(f, target, idx)
@@ -793,6 +836,9 @@ func _net_duel(state: Array) -> void:
 		duel_foe_goal = duel_foe_goals[0]
 	if duel_was_alive and int(duel_me.get("hp", 0)) <= 0:
 		duel_was_alive = false
+		charging = false
+		charge_t = 0.0
+		stick_on = false
 		_banner("ELIMINATED")
 	duel_bullets = state[1]
 	duel_chests = state[2]
@@ -893,6 +939,9 @@ func _net_click(mp: Vector2) -> void:
 			_net_host()
 		elif BTN_NET_JOIN.has_point(mp):
 			net_screen = "join"
+	elif net_screen == "host" and net_mode == "host":
+		if BTN_NET_ROLE.has_point(mp):
+			duel_host_plays = not duel_host_plays
 	elif net_screen == "join":
 		if NET_IP_RECT.has_point(mp):
 			join_focused = true
@@ -901,7 +950,9 @@ func _net_click(mp: Vector2) -> void:
 			if BTN_NET_JOIN.has_point(mp):
 				_net_join(join_ip)
 	elif net_screen == "ready" and net_mode == "host":
-		if BTN_START.has_point(mp):
+		if BTN_NET_ROLE2.has_point(mp):
+			duel_host_plays = not duel_host_plays
+		elif BTN_START.has_point(mp):
 			var ids := _duel_roster()
 			_net_begin(ids)
 			_net_begin.rpc(ids)
@@ -941,7 +992,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				mouse_pos = _touch_pos(st.position)
 				if mode == "play":
 					_begin_charge()
-			elif not stick_on and mode == "play" and net_mode != "off" and not duel_over:
+			elif not stick_on and mode == "play" and net_mode != "off" and not duel_over and int(duel_me.get("hp", 0)) > 0:
 				stick_on = true
 				stick_id = st.index
 				stick_base = st.position
@@ -1690,6 +1741,9 @@ func _update_duel(delta: float) -> void:
 					_ring(cp, GOLD, 10, 200.0)
 		if duel_was_alive and int(duel_me.get("hp", 0)) <= 0:
 			duel_was_alive = false
+			charging = false
+			charge_t = 0.0
+			stick_on = false
 			_banner("ELIMINATED")
 		time_left -= delta
 		if time_left <= 0.0:
@@ -1734,6 +1788,13 @@ func _update_duel(delta: float) -> void:
 		time_left = maxf(0.0, time_left - delta)
 	ball_pos = duel_me["pos"]
 	ball_vel = duel_me["vel"]
+	# No live fighter of my own: ride along with the action instead. The
+	# camera, minimap and radar all follow ball_pos, so this alone moves them.
+	if _duel_watching():
+		var w := _duel_watch_target()
+		if not w.is_empty():
+			ball_pos = w["pos"]
+			ball_vel = w["vel"]
 	trail.append(ball_pos)
 	if trail.size() > 26:
 		trail.pop_front()
@@ -1865,7 +1926,7 @@ func _duel_update_bullets(dt: float, authoritative: bool) -> void:
 				var foe: Dictionary = allf[i]
 				if int(foe.get("hp", 0)) <= 0:
 					continue
-				if bp.distance_to(foe["pos"]) < BALL_R + 6.0:
+				if bp.distance_to(foe["pos"]) < BALL_R + DUEL_BULLET_R:
 					_duel_hurt(foe, int(b["dmg"]))
 					_burst(bp, PINK, 8, 200.0)
 					dead = true
@@ -3170,6 +3231,10 @@ func _predict_arc(v0: Vector2) -> PackedVector2Array:
 
 # ------------------------------------------------------------------ draw actors
 func _draw_ball() -> void:
+	# Spectators have no ball of their own; the watched fighter is drawn by
+	# _draw_duel_world, so skip this or it would double-draw on top of them.
+	if _duel_watching():
+		return
 	var bc := _ball_col()
 	var bh := _ball_hot()
 	var n := trail.size() if trail_opt else 0
@@ -3265,6 +3330,8 @@ func _draw_hud() -> void:
 		_text_right(str(kills), Vector2(1232.0, 56.0), 26, WHITE, true)
 	if mode == "play" and net_mode != "off" and not duel_over:
 		var hint := "RMB / F shoot   ·   chests give guns   ·   smash balls to bounce again"
+		if _duel_watching():
+			hint = "SPECTATING - the round plays on without you"
 		if DisplayServer.is_touchscreen_available():
 			hint = "hold + drag to bounce   ·   2nd finger: push stick to shoot"
 		_text_center_at(Vector2(640.0, 700.0), hint, 12, Color(0.45, 0.60, 0.80, 0.55))
@@ -3307,9 +3374,11 @@ func _duel_foe_col(o: int) -> Color:
 
 ## Duel corners: my health + gun, then every rival stacked top-right.
 func _draw_duel_corners() -> void:
-	_text("YOU", Vector2(48.0, 28.0), 11, DIM)
-	var my_hp := int(duel_me.get("hp", DUEL_HP))
-	var my_gun := int(duel_me.get("gun", 0))
+	var watching := _duel_watching()
+	_text("SPECTATING" if watching else "YOU", Vector2(48.0, 28.0), 11, DIM)
+	var w := _duel_watch_target() if watching else {}
+	var my_hp := int(w.get("hp", 0)) if watching else int(duel_me.get("hp", DUEL_HP))
+	var my_gun := 0 if watching else int(duel_me.get("gun", 0))
 	_text(str(my_hp), Vector2(48.0, 56.0), 26, WHITE, true)
 	_text(DUEL_GUN_NAMES[clampi(my_gun, 0, 2)], Vector2(48.0, 82.0), 12, CYAN if my_gun > 0 else RED)
 	var bw2 := 150.0
@@ -3346,8 +3415,8 @@ func _draw_duel_world() -> void:
 		draw_rect(Rect2(pp + Vector2(8.0, -2.0), Vector2(12.0, 4.0)), gc)
 	for b in duel_bullets:
 		var bc: Color = CYAN if int(b["owner"]) == _duel_role() else Color(1.0, 0.55, 0.30)
-		draw_circle(b["pos"], 8.0, Color(bc.r, bc.g, bc.b, 0.25))
-		draw_circle(b["pos"], 5.0, bc)
+		draw_circle(b["pos"], DUEL_BULLET_R + 6.0, Color(bc.r, bc.g, bc.b, 0.25))
+		draw_circle(b["pos"], DUEL_BULLET_R, bc)
 	# Rival fighters in their own colors, skipped once eliminated.
 	for o in duel_foes.size():
 		var f: Dictionary = duel_foes[o]
@@ -3524,10 +3593,13 @@ func _draw_net() -> void:
 			var big := i == 0
 			_text_center_at(Vector2(640.0, 306.0 + i * 34.0), "%s:%d" % [str(ips[i]), NET_PORT], 26 if big else 19, WHITE if big else DIM, bold_font)
 		var rivals := multiplayer.get_peers().size()
-		_text_center_at(Vector2(640.0, 320.0 + mini(ips.size(), 4) * 34.0), "waiting for rivals... (%d/%d)" % [rivals, DUEL_MAX_PLAYERS - 1], 18, Color(0.85, 0.97, 1.0, 0.5 + 0.5 * sin(t * 4.0)))
+		var cap := DUEL_MAX_PLAYERS if not duel_host_plays else DUEL_MAX_PLAYERS - 1
+		_text_center_at(Vector2(640.0, 320.0 + mini(ips.size(), 4) * 34.0), "waiting for rivals... (%d/%d)" % [rivals, cap], 18, Color(0.85, 0.97, 1.0, 0.5 + 0.5 * sin(t * 4.0)))
+		_net_button(BTN_NET_ROLE, "HOST FIGHTS" if duel_host_plays else "HOST SPECTATES", mp)
 	elif net_screen == "ready":
 		if net_mode == "host":
 			_text_center_at(Vector2(640.0, 300.0), "RIVALS READY: %d" % multiplayer.get_peers().size(), 26, CYAN, bold_font)
+			_net_button(BTN_NET_ROLE2, "HOST FIGHTS" if duel_host_plays else "HOST SPECTATES", mp)
 			_net_button(BTN_START, "START", mp)
 		else:
 			_text_center_at(Vector2(640.0, 300.0), "RIVAL FOUND", 26, CYAN, bold_font)
@@ -3585,8 +3657,13 @@ func _draw_game_over() -> void:
 	if net_mode != "off" and duel_over:
 		var i_won := duel_winner == duel_my_id
 		var dh := "YOU WIN" if i_won else ("DRAW" if duel_winner < 0 else "YOU LOSE")
+		var sub := "YOU  %d HP" % int(duel_me.get("hp", 0))
+		if duel_my_id < 0:
+			sub = "SPECTATED MATCH"
+			if duel_winner >= 0:
+				dh = "%s WINS" % _duel_foe_name(duel_winner)
 		_text_center_at(Vector2(640.0, 250.0), dh, 68, PINK, bold_font)
-		_text_center_at(Vector2(640.0, 340.0), "YOU  %d HP" % int(duel_me.get("hp", 0)), 40, WHITE, bold_font)
+		_text_center_at(Vector2(640.0, 340.0), sub, 40, WHITE, bold_font)
 		var oy := 392.0
 		for o in duel_foes.size():
 			_text_center_at(Vector2(640.0, oy), "%s  %d HP" % [_duel_foe_name(o), int((duel_foes[o] as Dictionary).get("hp", 0))], 24, CYAN)
