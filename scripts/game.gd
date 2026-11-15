@@ -18,7 +18,7 @@ const CAM_LERP := 4.6            # camera follow stiffness (higher = tighter)
 const CAM_LOOKAHEAD := 0.26      # how far ahead of the ball the camera leads
 const CAM_MOUSE_BIAS := 0.28     # how far the camera leans from ball toward cursor
 const CAM_MIN_ZOOM := 0.55       # widest the camera pulls back for boss+ball
-const TARGET_POP := 130          # live balls streamed around the camera
+const TARGET_POP := 14          # live balls streamed around the camera
 const BUMPER_POP := 40           # static bumpers spread across the world
 const MIN_VISIBLE := 18          # always keep at least this many balls on screen
 
@@ -26,7 +26,8 @@ const MIN_VISIBLE := 18          # always keep at least this many balls on scree
 # further away than STREAM_KEEP, so only nearby balls exist at any time.
 const STREAM_MARGIN := 620.0
 const STREAM_KEEP := 1100.0
-const STREAM_INTERVAL := 0.15
+const STREAM_INTERVAL := 0.45
+const SINGLEPLAYER_SPAWN_SCALE := 1.0 / 3.0  # singleplayer spawn rate vs versus
 const CULL_MARGIN := 150.0       # skip drawing anything beyond the screen edge
 
 const START_TIME := 32.0         # seconds on the clock at the start
@@ -2503,7 +2504,7 @@ func _update_streaming(dt: float) -> void:
 	stream_t -= dt
 	if stream_t > 0.0:
 		return
-	stream_t = STREAM_INTERVAL
+	stream_t = STREAM_INTERVAL * (1.0 if net_mode != "off" else SINGLEPLAYER_SPAWN_SCALE)
 
 	var view := _view_rect()
 	var keep := view.grow(STREAM_KEEP)
@@ -2923,14 +2924,6 @@ func _update_duel(delta: float) -> void:
 			stick_on = false
 			stick_mouse = false
 			_banner("ELIMINATED")
-		time_left -= delta
-		if time_left <= 0.0:
-			time_left = 0.0
-			# No HP verdict: a win needs every rival dead, so the clock
-			# can only end it level. The elimination check below crowns
-			# the last fighter standing.
-			_duel_finish(-1)
-			return
 		var alive: Array = []
 		for i in allf.size():
 			if int((allf[i] as Dictionary).get("hp", 0)) > 0:
@@ -5111,17 +5104,16 @@ func _draw_hud() -> void:
 			hint = "hold + drag to bounce   ·   2nd finger: push stick to shoot"
 		_text_center_at(Vector2(640.0, 700.0), hint, 12, Color(0.45, 0.60, 0.80, 0.55))
 
-	var bw := 320.0
-	var bx := 640.0 - bw * 0.5
-	var by := 20.0
-	draw_rect(Rect2(bx, by, bw, 4.0), Color(0.35, 0.55, 1.0, 0.14))
-	var p := clampf(time_left / maxf(max_time, 0.001), 0.0, 1.0)
-	if p > 0.0:
-		var tc := RED if p < 0.25 else CYAN
-		draw_rect(Rect2(bx, by, bw * p, 4.0), tc)
-	_text_center_at(Vector2(640.0, 44.0), "%ds" % int(ceil(time_left)), 13, UI_SUB)
-	if net_mode != "off" and mode == "play" and not duel_walls.is_empty():
-		_text_center_at(Vector2(640.0, 78.0), _duel_map_name(duel_map), 11, Color(0.55, 0.85, 1.0, 0.6))
+	if net_mode == "off":
+		var bw := 320.0
+		var bx := 640.0 - bw * 0.5
+		var by := 20.0
+		draw_rect(Rect2(bx, by, bw, 4.0), Color(0.35, 0.55, 1.0, 0.14))
+		var p := clampf(time_left / maxf(max_time, 0.001), 0.0, 1.0)
+		if p > 0.0:
+			var tc := RED if p < 0.25 else CYAN
+			draw_rect(Rect2(bx, by, bw * p, 4.0), tc)
+		_text_center_at(Vector2(640.0, 44.0), "%ds" % int(ceil(time_left)), 13, UI_SUB)
 
 	if combo > 1:
 		_text_center_at(Vector2(640.0, 62.0), "COMBO x%d" % combo, 12, GOLD)
@@ -5136,10 +5128,6 @@ func _draw_hud() -> void:
 		if _rtt >= 0:
 			_msg += " (%dms)" % _rtt
 		_text_center_at(Vector2(640.0, 62.0), _msg, 13, RED)
-
-	if mode == "play" and time_left < 5.0:
-		var a := (1.0 - time_left / 5.0) * (0.16 + 0.10 * sin(t * 10.0))
-		draw_rect(Rect2(0.0, 0.0, 1280.0, 720.0), Color(1.0, 0.2, 0.35, a), false, 26.0)
 
 	if muted:
 		_text_right("MUTED", Vector2(1232.0, 700.0), 12, DIM)
