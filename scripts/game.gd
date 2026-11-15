@@ -88,6 +88,9 @@ const PURPLE := Color(0.65, 0.55, 0.98)
 # Customization: ball skins, menu buttons and customize rows.
 const BALL_SKINS := [CYAN, PINK, GOLD, GREEN, PURPLE]
 const BALL_NAMES := ["CYAN", "PINK", "GOLD", "GREEN", "PURPLE"]
+# Photo ball skins: circular portraits drawn over the ball.
+const BALL_FACE_PATHS := ["res://images (2)-modified.png", "res://Kai_Cenat-modified.png", "res://LacyHimself-modified.png"]
+const BALL_FACE_NAMES := ["FACE", "KAI", "LACY"]
 const CUSTOM_LABELS := ["BALL", "TRAIL", "SHAKE", "GLOW", "SOUND"]
 const BTN_START := Rect2(490.0, 532.0, 300.0, 56.0)
 const BTN_CUSTOM := Rect2(490.0, 596.0, 146.0, 40.0)
@@ -202,6 +205,8 @@ var ball_vel: Vector2 = Vector2.ZERO
 var ball_flash: float = 0.0
 var trail: Array = []
 
+var ball_faces: Array = []
+
 var charging: bool = false
 var charge_t: float = 0.0
 var shot_ready: bool = true       # only one launch per ball hit
@@ -315,9 +320,49 @@ func _ready() -> void:
 	_setup_fonts()
 	_setup_audio()
 	_setup_post_fx()
+	_setup_ball_faces()
 	_load_best()
 	_load_custom()
 	_enter_title()
+
+
+## Photo ball skins from res:// (*-modified.png). Loaded once; missing files
+## simply leave that skin empty and the ball falls back to its color ring.
+func _setup_ball_faces() -> void:
+	ball_faces.clear()
+	for p in BALL_FACE_PATHS:
+		if ResourceLoader.exists(p):
+			var tex: Texture2D = load(p)
+			ball_faces.append(tex)
+		else:
+			ball_faces.append(null)
+
+
+func _ball_total_skins() -> int:
+	return BALL_SKINS.size() + BALL_FACE_PATHS.size()
+
+
+func _ball_face_index() -> int:
+	var i := ball_idx - BALL_SKINS.size()
+	if i < 0 or i >= BALL_FACE_PATHS.size():
+		return -1
+	return i
+
+
+func _ball_face_tex() -> Texture2D:
+	var i := _ball_face_index()
+	if i < 0 or i >= ball_faces.size():
+		return null
+	return ball_faces[i] as Texture2D
+
+
+func _ball_skin_name() -> String:
+	if ball_idx < BALL_SKINS.size():
+		return str(BALL_NAMES[clampi(ball_idx, 0, BALL_NAMES.size() - 1)])
+	var i := _ball_face_index()
+	if i >= 0 and i < BALL_FACE_NAMES.size():
+		return str(BALL_FACE_NAMES[i])
+	return "?"
 
 
 func _setup_fonts() -> void:
@@ -482,7 +527,7 @@ func _save_best() -> void:
 func _load_custom() -> void:
 	var cfg := ConfigFile.new()
 	if cfg.load("user://bounce_back.cfg") == OK:
-		ball_idx = clampi(int(cfg.get_value("custom", "ball", 0)), 0, BALL_SKINS.size() - 1)
+		ball_idx = clampi(int(cfg.get_value("custom", "ball", 0)), 0, _ball_total_skins() - 1)
 		trail_opt = bool(cfg.get_value("custom", "trail", true))
 		shake_opt = bool(cfg.get_value("custom", "shake", true))
 		glow_opt = bool(cfg.get_value("custom", "glow", true))
@@ -501,6 +546,8 @@ func _save_custom() -> void:
 
 
 func _ball_col() -> Color:
+	if _ball_face_index() >= 0:
+		return WHITE
 	return BALL_SKINS[clampi(ball_idx, 0, BALL_SKINS.size() - 1)]
 
 
@@ -533,7 +580,7 @@ func _custom_value(i: int) -> String:
 func _cycle_custom(i: int) -> void:
 	match i:
 		0:
-			ball_idx = (ball_idx + 1) % BALL_SKINS.size()
+			ball_idx = (ball_idx + 1) % _ball_total_skins()
 		1:
 			trail_opt = not trail_opt
 		2:
@@ -3067,6 +3114,7 @@ func _duel_predict_my_pickup() -> void:
 			duel_pickups.remove_at(pi)
 
 
+
 func _update_targets(dt: float) -> void:
 	var chase_speed := 110.0 + minf(kills * 2.8, 175.0)
 	for tg in targets:
@@ -4123,8 +4171,15 @@ func _draw_ball() -> void:
 
 	draw_circle(ball_pos, BALL_R + 18.0 + ball_flash * 8.0, Color(bc.r, bc.g, bc.b, 0.05 + ball_flash * 0.04))
 	draw_circle(ball_pos, BALL_R + 7.0, Color(minf(bc.r + 0.1, 1.0), minf(bc.g + 0.1, 1.0), minf(bc.b + 0.1, 1.0), 0.12))
-	draw_circle(ball_pos, BALL_R, bh)
-	draw_circle(ball_pos - Vector2(BALL_R * 0.3, BALL_R * 0.3), BALL_R * 0.45, WHITE_HOT)
+	var face := _ball_face_tex()
+	if face != null:
+		draw_circle(ball_pos, BALL_R, Color(0.0, 0.0, 0.0, 0.55))
+		draw_texture_rect(face, Rect2(ball_pos - Vector2(BALL_R, BALL_R), Vector2(BALL_R * 2.0, BALL_R * 2.0)), false)
+		draw_arc(ball_pos, BALL_R, 0.0, TAU, 40, Color(1.0, 1.0, 1.0, 0.85), 2.0, true)
+		draw_circle(ball_pos - Vector2(BALL_R * 0.3, BALL_R * 0.3), BALL_R * 0.22, Color(1.0, 1.0, 1.0, 0.35))
+	else:
+		draw_circle(ball_pos, BALL_R, bh)
+		draw_circle(ball_pos - Vector2(BALL_R * 0.3, BALL_R * 0.3), BALL_R * 0.45, WHITE_HOT)
 
 	if mode == "play" and shot_ready:
 		draw_arc(ball_pos, BALL_R + 12.0, 0.0, TAU, 40, Color(_ball_col().r, _ball_col().g, _ball_col().b, 0.32), 2.0, true)
@@ -4459,10 +4514,17 @@ func _draw_custom() -> void:
 		draw_rect(r, Color(0.42, 0.66, 1.0, 0.35) if hov else Color(0.42, 0.66, 1.0, 0.18), false, 1.0)
 		_text(CUSTOM_LABELS[i], Vector2(r.position.x + 24.0, r.position.y + 32.0), 20, WHITE if hov else DIM)
 		if i == 0:
-			var skin: Color = BALL_SKINS[clampi(ball_idx, 0, BALL_SKINS.size() - 1)]
-			draw_circle(Vector2(640.0, r.position.y + 24.0), 14.0, skin)
-			draw_circle(Vector2(640.0, r.position.y + 24.0), 6.0, WHITE)
-			_text_right("<  " + BALL_NAMES[clampi(ball_idx, 0, BALL_NAMES.size() - 1)] + "  >", Vector2(r.end.x - 24.0, r.position.y + 32.0), 20, skin)
+			var face_prev := _ball_face_tex()
+			var skin: Color = _ball_col()
+			if face_prev != null:
+				var c := Vector2(640.0, r.position.y + 24.0)
+				draw_circle(c, 14.0, Color(0.0, 0.0, 0.0, 0.55))
+				draw_texture_rect(face_prev, Rect2(c - Vector2(14.0, 14.0), Vector2(28.0, 28.0)), false)
+				draw_arc(c, 14.0, 0.0, TAU, 24, Color(1.0, 1.0, 1.0, 0.85), 1.5, true)
+			else:
+				draw_circle(Vector2(640.0, r.position.y + 24.0), 14.0, skin)
+				draw_circle(Vector2(640.0, r.position.y + 24.0), 6.0, WHITE)
+			_text_right("<  " + _ball_skin_name() + "  >", Vector2(r.end.x - 24.0, r.position.y + 32.0), 20, skin)
 		else:
 			_text_right("<  " + _custom_value(i) + "  >", Vector2(r.end.x - 24.0, r.position.y + 32.0), 20, CYAN if _custom_on(i) else DIM)
 	var hov_b := BTN_BACK.has_point(mp)
