@@ -1,7 +1,7 @@
 extends Node2D
 ## BOUNCE BACK — hold to charge, release to launch the ball toward the cursor.
 ## Fast impacts shatter balls, slow ones bounce off. The camera follows the ball
-## through a world several screens wide. Gravity pulls the ball down, and the
+## and leans toward the cursor, through a world several screens wide. Gravity pulls the ball down, and the
 ## molten floor along the bottom of the world ends the run on contact.
 ## Everything is drawn in code.
 ##
@@ -14,6 +14,7 @@ const BALL_R := 15.0
 
 const CAM_LERP := 4.6            # camera follow stiffness (higher = tighter)
 const CAM_LOOKAHEAD := 0.26      # how far ahead of the ball the camera leads
+const CAM_MOUSE_BIAS := 0.28     # how far the camera leans from ball toward cursor
 const CAM_MIN_ZOOM := 0.55       # widest the camera pulls back for boss+ball
 const TARGET_POP := 130          # live balls streamed around the camera
 const BUMPER_POP := 40           # static bumpers spread across the world
@@ -264,6 +265,11 @@ var duel_chest_max := 6
 var duel_pickups: Array = []
 var duel_snap_t := 0.0
 var duel_snap_balls := true  # balls ride every 2nd snapshot: full 20 Hz sim, 10 Hz ball list
+var duel_snap_seq := 0   # host stamps every snapshot; the client drops stale ones
+var duel_last_seq := -1  # newest snapshot seq applied (client); stale = out of order
+var duel_launch_echo := 0  # leftover launch re-sends; one lost packet can't strand us
+var duel_launch_vel := Vector2.ZERO  # velocity the echo re-sends
+var duel_echo_t := 0.0  # spacing between echo re-sends
 var duel_refill_t := 0.0
 var duel_over := false
 var duel_winner := -1  # winning fighter index, or -1 for draw/undecided
@@ -770,6 +776,9 @@ func _duel_reset(roster: Array = []) -> void:
 	duel_chest_max = (4 if n <= 2 else 6) + 2
 	duel_chest_t = DUEL_CHEST_RESPAWN_T
 	duel_snap_t = 0.0
+	duel_snap_seq = 0
+	duel_last_seq = -1
+	duel_launch_echo = 0
 	duel_over = false
 	duel_winner = -1
 	duel_was_alive = duel_my_id >= 0
@@ -814,8 +823,11 @@ func _net_restart_request() -> void:
 
 
 ## Client -> host: my launch impulse. Host owns every client fighter and
-## maps the sender id to its roster slot.
-@rpc("any_peer", "call_remote", "reliable")
+## maps the sender id to its roster slot. Unreliable on purpose: inputs must
+## never stall behind a retransmit. The client echoes each launch twice, and
+## the ready-gate below makes repeats free: the first one lands, the rest
+## are ignored, so at most one launch ever applies.
+@rpc("any_peer", "call_remote", "unreliable")
 func _duel_launch(v: Vector2) -> void:
 	if net_mode != "host" or duel_over or mode != "play":
 		return
@@ -830,7 +842,9 @@ func _duel_launch(v: Vector2) -> void:
 
 
 ## Client -> host: shoot toward a world point. Host validates gun + cooldown.
-@rpc("any_peer", "call_remote", "reliable")
+## Unreliable like the launch: the gun refires every 0.35-0.6 s, so a dropped
+## packet costs one shot, while a retransmit stall would cost every shot.
+@rpc("any_peer", "call_remote", "unreliable")
 func _duel_fire(target: Vector2) -> void:
 	if net_mode != "host" or duel_over or mode != "play":
 		return
@@ -844,34 +858,48 @@ func _duel_fire(target: Vector2) -> void:
 
 
 ## Host -> client: full duel snapshot, 20 Hz, unreliable. Fighters ride in
-## roster order as [pos, vel, hp, gun, ready] each; I reconcile my slot and
-## glide every rival toward its newest sample.
+## roster order as [pos, vel, hp, gun, ready] each; bullets/chests/pickups
+## ride packed flat (numbers only, no key strings); the trailing seq stamps
+## the order. I reconcile my slot and glide every rival toward its sample.
 @rpc("authority", "call_remote", "unreliable")
 func _net_duel(state: Array) -> void:
 	if net_mode != "client" or mode != "play":
 		return
 	net_last_snap = t
+	# Out-of-order snapshot: the newer one already applied, ignore this.
+	var seq := int(state[6]) if state.size() > 6 else 0
+	if seq <= duel_last_seq:
+		return
+	duel_last_seq = seq
 	var fighters: Array = state[0]
 	for i in range(mini(fighters.size(), duel_ids.size())):
 		var fd: Array = fighters[i]
 		if fd.size() < 5:
 			continue
 		if i == duel_my_id:
+			var old_hp := int(duel_me.get("hp", 0))
 			var mp: Vector2 = fd[0]
-			if mp.distance_to(duel_me["pos"]) < 140.0:
-				duel_me["pos"] = (duel_me["pos"] as Vector2).lerp(mp, 0.35)
-			else:
+			# Prediction now mirrors the host sim, so ease gently toward
+			# each sample; only a true desync still snaps.
+			if mp.distance_to(duel_me["pos"]) > 400.0:
 				duel_me["pos"] = mp
+			else:
+				duel_me["pos"] = (duel_me["pos"] as Vector2).lerp(mp, 0.2)
 			duel_me["vel"] = fd[1]
 			duel_me["hp"] = fd[2]
 			duel_me["gun"] = fd[3]
 			duel_me["ready"] = fd[4]
+			_duel_client_hurt_fx(duel_me["pos"], old_hp, int(fd[2]), true)
 			shot_ready = bool(duel_me["ready"])
+			# The host applied our launch: its echo job is done.
+			if not bool(duel_me["ready"]):
+				duel_launch_echo = 0
 		else:
 			var o := i if i < duel_my_id else i - 1
 			if o < 0 or o >= duel_foes.size():
 				continue
 			var f: Dictionary = duel_foes[o]
+			var f_old := int(f.get("hp", 0))
 			var new_goal: Vector2 = fd[0]
 			if new_goal.distance_to(f["pos"]) > 220.0:
 				f["pos"] = new_goal
@@ -880,6 +908,7 @@ func _net_duel(state: Array) -> void:
 			f["hp"] = fd[2]
 			f["gun"] = fd[3]
 			f["ready"] = fd[4]
+			_duel_client_hurt_fx(f["pos"], f_old, int(fd[2]), false)
 	if not duel_foes.is_empty():
 		duel_foe = duel_foes[0]
 		duel_foe_goal = duel_foe_goals[0]
@@ -895,32 +924,89 @@ func _net_duel(state: Array) -> void:
 	# velocity; both sides extrapolate with it) and correct only halfway:
 	# steady-state drift is ~zero, so the lerp eats network jitter instead
 	# of flashing it. Newly spawned bullets have no match and land exact.
-	var fresh: Array = state[1]
+	# Unpack the flat bullet wire format back into sim dicts.
+	var bf2: Array = state[1]
+	var fresh: Array = []
+	for i in range(0, bf2.size(), 7):
+		if i + 6 >= bf2.size():
+			break
+		fresh.append({"pos": Vector2(float(bf2[i]), float(bf2[i + 1])), "vel": Vector2(float(bf2[i + 2]), float(bf2[i + 3])), "owner": int(bf2[i + 4]), "life": float(bf2[i + 5]), "dmg": int(bf2[i + 6])})
+	var old_bl: Array = duel_bullets
 	var smooth: Array = []
 	var used: Array = []
 	for nb in fresh:
 		var nd: Dictionary = nb
 		var found := -1
-		for oi in duel_bullets.size():
+		for oi in old_bl.size():
 			if used.has(oi):
 				continue
-			var ob: Dictionary = duel_bullets[oi]
+			var ob: Dictionary = old_bl[oi]
 			if int(ob.get("owner", -9)) == int(nd.get("owner", -9)) and (ob["vel"] as Vector2).distance_squared_to(nd["vel"] as Vector2) < 1.0:
 				found = oi
 				break
 		if found >= 0:
 			used.append(found)
-			var ob2: Dictionary = duel_bullets[found]
+			var ob2: Dictionary = old_bl[found]
 			smooth.append({"pos": (ob2["pos"] as Vector2).lerp(nd["pos"], 0.5), "vel": nd["vel"], "owner": nd["owner"], "life": nd["life"], "dmg": nd["dmg"]})
 		else:
 			smooth.append(nd)
+	# A bullet the host dropped mid-flight with life left hit something.
+	# Its burst only shows on the host screen, so replay it here instead.
+	for oi in old_bl.size():
+		if used.has(oi):
+			continue
+		var ob3: Dictionary = old_bl[oi]
+		var op: Vector2 = ob3["pos"]
+		if float(ob3.get("life", 0.0)) > 0.0 and op.x > WORLD.position.x and op.x < WORLD.end.x and op.y > WORLD.position.y and op.y < _lava_top():
+			_burst(op, PINK, 8, 200.0)
+			_ring(op, PINK, 8, 220.0)
+			if op.distance_to(ball_pos) < 700.0:
+				shake = maxf(shake, 3.0)
 	duel_bullets = smooth
-	duel_chests = state[2]
-	duel_pickups = state[3]
+	# Chests never move, so a missing old one broke and a missing new one
+	# just dropped in: replay both, same as the host sees in its sim.
+	var cf2: Array = state[2]
+	var new_chests: Array = []
+	for i in range(0, cf2.size(), 3):
+		if i + 2 >= cf2.size():
+			break
+		new_chests.append({"pos": Vector2(float(cf2[i]), float(cf2[i + 1])), "hp": int(cf2[i + 2])})
+	if not duel_chests.is_empty():
+		for ch in duel_chests:
+			var cp: Vector2 = ch["pos"]
+			var gone := true
+			for nc in new_chests:
+				if ((nc as Dictionary)["pos"] as Vector2).distance_to(cp) < 1.0:
+					gone = false
+					break
+			if gone:
+				_burst(cp, GOLD, 14, 260.0)
+				_ring(cp, GOLD, 12, 240.0)
+				if cp.distance_to(ball_pos) < 700.0:
+					shake = maxf(shake, 6.0)
+				_sfx("bump", 0.0, -12.0)
+		for nc2 in new_chests:
+			var np: Vector2 = (nc2 as Dictionary)["pos"]
+			var is_new := true
+			for ch2 in duel_chests:
+				if ((ch2 as Dictionary)["pos"] as Vector2).distance_to(np) < 1.0:
+					is_new = false
+					break
+			if is_new:
+				_ring(np, GOLD, 10, 200.0)
+	duel_chests = new_chests
+	var pf2: Array = state[3]
+	var new_pickups: Array = []
+	for i in range(0, pf2.size(), 3):
+		if i + 2 >= pf2.size():
+			break
+		new_pickups.append({"pos": Vector2(float(pf2[i]), float(pf2[i + 1])), "kind": int(pf2[i + 2])})
+	duel_pickups = new_pickups
 	time_left = state[4]
 	var flat: Array = state[5]
 	if flat.is_empty():
 		return
+	var old_targets := targets.duplicate()
 	targets.clear()
 	for i in range(0, flat.size(), 4):
 		if i + 3 >= flat.size():
@@ -931,8 +1017,10 @@ func _net_duel(state: Array) -> void:
 		tg.tame = true
 		# Snapshot balls already exist on the host: full fade-in and a free
 		# pulse phase, or every ball would sit near-invisible (age 0).
+		# Spike rotation is never synced: each ball derives a stable phase
+		# from its list index, so no rotation state is tracked or sent.
 		tg.age = 1.0
-		tg.phase = randf() * TAU
+		tg.phase = fmod(float(i >> 2) * 2.399963, TAU)
 		var dk := int(flat[i + 3])
 		if dk == 2:
 			tg.kind = "armored"
@@ -945,6 +1033,27 @@ func _net_duel(state: Array) -> void:
 			tg.kind = "basic"
 			tg.color = PINK
 		targets.append(tg)
+	# A ball the host dropped is a smash: replay it with the same burst +
+	# ring solo gets. An empty old list is just the first sync, not kills.
+	if not old_targets.is_empty():
+		for ot in old_targets:
+			var sp: Vector2 = ot.pos
+			var taken := true
+			for j in range(0, flat.size(), 4):
+				if Vector2(float(flat[j]), float(flat[j + 1])).distance_to(sp) < 30.0:
+					taken = false
+					break
+			if taken:
+				var sc := PINK
+				if ot.kind == "drifter":
+					sc = GREEN
+				elif ot.kind == "armored":
+					sc = GOLD
+				_burst(sp, sc, 12, 280.0)
+				_ring(sp, sc, 8, 220.0)
+				if sp.distance_to(ball_pos) < 700.0:
+					shake = maxf(shake, 4.0)
+				_sfx("kill", 0.08, -12.0)
 
 
 ## Host -> client: the round is decided. Both sides show the verdict.
@@ -1358,6 +1467,12 @@ func _fire() -> void:
 		shot_ready = false
 		if net_mode == "client":
 			_duel_launch.rpc(ball_vel)
+			# Echo the launch twice, spaced out: ENet may drop one packet,
+			# and a lost launch strands the client mid-flight. Same-frame
+			# copies would share one datagram's fate, so they go staggered.
+			duel_launch_vel = ball_vel
+			duel_launch_echo = 2
+			duel_echo_t = 0.08
 	else:
 		shot_ready = false
 	trail.clear()
@@ -1722,6 +1837,11 @@ func _update_camera(dt: float) -> void:
 	# While the boss is up the camera frames both fighters, pulling back just
 	# far enough to keep them on screen together.
 	var target := ball_pos + ball_vel * CAM_LOOKAHEAD
+	# Lean the frame toward the cursor so the space being aimed into stays
+	# visible. ball_pos already tracks my fighter in versus, so this covers
+	# singleplayer and multiplayer alike (and touch, via the aim finger).
+	if mouse_seen:
+		target = target.lerp(mouse_pos, CAM_MOUSE_BIAS)
 	var want_zoom := 1.0
 	if boss != null:
 		target = (ball_pos + boss.pos) * 0.5
@@ -1809,6 +1929,11 @@ func _update_play(delta: float) -> void:
 ## client commands launches/shots and predicts its own fighter. 100 HP each,
 ## breaking a chest instantly equips PISTOL then SPREAD; KO (or more HP at 0s) wins.
 func _update_duel(delta: float) -> void:
+	# Solo freezes a beat on big hits; the duel shares the same punch.
+	if hitstop > 0.0:
+		hitstop -= delta
+		_update_particles(delta * 0.2)
+		return
 	ball_pos = duel_me["pos"]
 	ball_vel = duel_me["vel"]
 	if charging:
@@ -1888,11 +2013,53 @@ func _update_duel(delta: float) -> void:
 					tg_flat.append(tg.pos.y)
 					tg_flat.append(tg.radius)
 					tg_flat.append(2 if tg.kind == "armored" else (1 if tg.kind == "drifter" else 0))
+			# Dictionaries re-send every key string per entry per snapshot,
+			# so bullets/chests/pickups ride packed flat: numbers only.
+			var bf: Array = []
+			for b in duel_bullets:
+				var bd: Dictionary = b
+				var bpp: Vector2 = bd["pos"]
+				var bvv: Vector2 = bd["vel"]
+				bf.append(bpp.x)
+				bf.append(bpp.y)
+				bf.append(bvv.x)
+				bf.append(bvv.y)
+				bf.append(bd["owner"])
+				bf.append(bd["life"])
+				bf.append(bd["dmg"])
+			var cf: Array = []
+			for ch in duel_chests:
+				var chd: Dictionary = ch
+				var cpp: Vector2 = chd["pos"]
+				cf.append(cpp.x)
+				cf.append(cpp.y)
+				cf.append(chd["hp"])
+			var pf: Array = []
+			for pk in duel_pickups:
+				var pkd: Dictionary = pk
+				var ppp: Vector2 = pkd["pos"]
+				pf.append(ppp.x)
+				pf.append(ppp.y)
+				pf.append(pkd["kind"])
+			# Sequence stamp: ENet unreliable can reorder, and an older
+				# snapshot must never overwrite a newer one on the client.
+			duel_snap_seq += 1
 			net_last_snap = t
-			_net_duel.rpc([fighters, duel_bullets, duel_chests, duel_pickups, time_left, tg_flat])
+			_net_duel.rpc([fighters, bf, cf, pf, time_left, tg_flat, duel_snap_seq])
 	else:
+		# Staggered launch echo: re-send until the host applies it.
+		if duel_launch_echo > 0:
+			duel_echo_t -= delta
+			if duel_echo_t <= 0.0:
+				duel_echo_t = 0.08
+				duel_launch_echo -= 1
+				_duel_launch.rpc(duel_launch_vel)
 		if int(duel_me.get("hp", 0)) > 0:
 			_duel_step(duel_me, wdt, false)
+			# Same contact response the host sim runs, in the same order,
+			# so its snapshots confirm prediction instead of rewinding it.
+			_duel_clash_me()
+			_duel_smash_check(false)
 		# Predict each rival with its last known velocity, then ease toward
 		# the newest sample. Kills the stop-and-jump of pure snapshot lerping.
 		for o in duel_foes.size():
@@ -1958,9 +2125,10 @@ func _duel_step(f: Dictionary, dt: float, authoritative: bool) -> void:
 			if authoritative:
 				_duel_hurt(f, DUEL_LAVA_DMG)
 				_popup(p + Vector2(0.0, -30.0), "-%d LAVA" % DUEL_LAVA_DMG, RED, 20)
-			_burst(p, RED, 10, 300.0)
-			_burst(p, GOLD, 8, 240.0)
-			_sfx("armor", 0.0, -8.0)
+				_burst(p, RED, 10, 300.0)
+				_burst(p, GOLD, 8, 240.0)
+				shake = maxf(shake, 4.0)
+				_sfx("armor", 0.0, -8.0)
 	# Chest bounce (host also chips the chest on hard hits).
 	for i in duel_chests.size():
 		var ch: Dictionary = duel_chests[i]
@@ -1980,7 +2148,8 @@ func _duel_step(f: Dictionary, dt: float, authoritative: bool) -> void:
 	f["vel"] = v
 
 
-## Body-slam: hard fighter contact hurts the slower one (host only).
+## Body-slam: hard fighter contact shoves both apart; the host also hurts
+## the slower one.
 func _duel_fighter_clash() -> void:
 	var allf := _duel_all()
 	for a in allf.size():
@@ -1988,7 +2157,21 @@ func _duel_fighter_clash() -> void:
 			_duel_clash_pair(allf[a], allf[b])
 
 
-func _duel_clash_pair(fa: Dictionary, fb: Dictionary) -> void:
+## Client-side: resolve body contact for my own fighter only, with the same
+## response the host pair applies. Damage still arrives via snapshots.
+func _duel_clash_me() -> void:
+	if duel_my_id < 0:
+		return
+	if int(duel_me.get("hp", 0)) <= 0 or bool(duel_me.get("gone", false)):
+		return
+	for foe in duel_foes:
+		var ff: Dictionary = foe
+		if int(ff.get("hp", 0)) <= 0 or bool(ff.get("gone", false)):
+			continue
+		_duel_clash_pair(duel_me, ff, false)
+
+
+func _duel_clash_pair(fa: Dictionary, fb: Dictionary, authoritative := true) -> void:
 	if int(fa.get("hp", 0)) <= 0 or int(fb.get("hp", 0)) <= 0:
 		return
 	if bool(fa.get("gone", false)) or bool(fb.get("gone", false)):
@@ -2013,11 +2196,17 @@ func _duel_clash_pair(fa: Dictionary, fb: Dictionary) -> void:
 		fa["slam"] = 1.0
 		fb["slam"] = 1.0
 		var a_slow := (fa["vel"] as Vector2).length() < (fb["vel"] as Vector2).length()
-		if a_slow:
-			_duel_hurt(fa, 8)
-		else:
-			_duel_hurt(fb, 8)
-		_ring(((fa["pos"] as Vector2) + (fb["pos"] as Vector2)) * 0.5, GOLD, 12, 200.0)
+		# Damage stays host-authoritative; the shove above runs on both
+		# sides so joiner prediction matches instead of snapping back.
+		if authoritative:
+			if a_slow:
+				_duel_hurt(fa, 8)
+			else:
+				_duel_hurt(fb, 8)
+		var mid := ((fa["pos"] as Vector2) + (fb["pos"] as Vector2)) * 0.5
+		_burst(mid, GOLD, 10, 260.0)
+		_ring(mid, GOLD, 12, 200.0)
+		shake = maxf(shake, 6.0)
 		_sfx("bump", 0.0, -8.0)
 
 
@@ -2048,6 +2237,9 @@ func _duel_update_bullets(dt: float, authoritative: bool) -> void:
 				if bp.distance_to(foe["pos"]) < BALL_R + DUEL_BULLET_R:
 					_duel_hurt(foe, int(b["dmg"]))
 					_burst(bp, PINK, 8, 200.0)
+					_ring(bp, PINK, 10, 260.0)
+					shake = maxf(shake, 4.0)
+					_sfx("bump", 0.05, -10.0)
 					dead = true
 					break
 		if not dead:
@@ -2101,11 +2293,46 @@ func _duel_damage_chest(i: int, dmg: int, breaker: Dictionary) -> void:
 		duel_pickups.append({"pos": ch["pos"], "kind": 1})
 	_burst(ch["pos"], GOLD, 14, 260.0)
 	_ring(ch["pos"], GOLD, 12, 240.0)
+	shake = maxf(shake, 8.0)
+	hitstop = maxf(hitstop, 0.05)
+	bloom_level = minf(bloom_level + 0.3, 1.8)
 	_sfx("bump", 0.0, -6.0)
 
 
 func _duel_hurt(f: Dictionary, dmg: int) -> void:
-	f["hp"] = maxi(0, int(f["hp"]) - dmg)
+	var old := int(f.get("hp", 0))
+	if old <= 0:
+		return
+	f["hp"] = maxi(0, old - dmg)
+	if int(f["hp"]) <= 0:
+		_duel_death_fx(f["pos"])
+
+
+## Shared elimination sendoff, solo-death style. The host spawns it in the
+## sim; joiners mirror it from snapshot hp diffs via _duel_client_hurt_fx.
+func _duel_death_fx(at: Vector2) -> void:
+	_burst(at, GOLD, 24, 420.0)
+	_burst(at, WHITE, 12, 260.0)
+	_ring(at, GOLD, 16, 320.0)
+	_popup(at + Vector2(0.0, -40.0), "ELIMINATED", RED, 22)
+	shake = maxf(shake, 12.0)
+	hitstop = maxf(hitstop, 0.08)
+	bloom_level = minf(bloom_level + 0.5, 1.8)
+	_sfx("kill", 0.08, -6.0)
+
+
+## Joiner-side hurt mirror: hp lives on the host, so damage is inferred
+## from snapshot diffs and the same juice replays locally.
+func _duel_client_hurt_fx(pos: Vector2, old_hp: int, new_hp: int, is_me: bool) -> void:
+	if new_hp >= old_hp or old_hp <= 0:
+		return
+	if new_hp <= 0:
+		_duel_death_fx(pos)
+	else:
+		_burst(pos, RED, 6, 220.0)
+		if is_me:
+			shake = maxf(shake, 5.0)
+			_sfx("armor", 0.0, -10.0)
 
 
 ## Duel balls: pink basics, green drifters and gold spikies (no pickups).
@@ -2200,14 +2427,21 @@ func _duel_chest_spot() -> Vector2:
 	return Vector2.INF
 
 
-## Host only: any living fighter touching a ball smashes it, reloading launch.
-## Spiky gold balls need a fast hit; a slow touch burns for DUEL_SPIKE_DMG
-## with a second of grace so resting contact can't melt a fighter.
-func _duel_smash_check() -> void:
-	for f in _duel_all():
-		if int((f as Dictionary).get("hp", 0)) <= 0 or bool((f as Dictionary).get("gone", false)):
+## Any living fighter touching a ball smashes it, reloading launch. The host
+## owns removals, reloads and damage; joiners predict only their own bounce
+## so snapshots confirm it instead of teleporting them back. Spiky gold balls
+## need a fast hit; a slow touch burns for DUEL_SPIKE_DMG with a second of
+## grace so resting contact can't melt a fighter.
+func _duel_smash_check(authoritative := true) -> void:
+	var allf := _duel_all()
+	for fi in allf.size():
+		var f: Dictionary = allf[fi]
+		if int(f.get("hp", 0)) <= 0 or bool(f.get("gone", false)):
 			continue
-		var fp: Vector2 = (f as Dictionary)["pos"]
+		# Joiners predict themselves only; rivals ease from snapshots.
+		if not authoritative and (duel_my_id < 0 or fi != 0):
+			continue
+		var fp: Vector2 = f["pos"]
 		for i in range(targets.size() - 1, -1, -1):
 			var tg = targets[i]
 			var rr: float = tg.radius + BALL_R
@@ -2228,16 +2462,27 @@ func _duel_smash_check() -> void:
 			if tg.kind == "armored" and spd < float(tg.req):
 				if float(f.get("spike", 0.0)) <= 0.0:
 					f["spike"] = 1.0
-					_duel_hurt(f, DUEL_SPIKE_DMG)
+					if authoritative:
+						_duel_hurt(f, DUEL_SPIKE_DMG)
 					_popup(tg.pos + Vector2(0.0, -30.0), "-%d SPIKES" % DUEL_SPIKE_DMG, RED, 20)
 					_shards(tg.pos, v, RED, 8, 470.0, 0.5)
 					_sfx("armor", 0.0, -8.0)
+				fp = f["pos"]
+				continue
+			if not authoritative:
+				# Bounce predicted; the host owns the kill and the joiner
+				# replays its juice when the snapshot confirms the smash.
 				fp = f["pos"]
 				continue
 			targets.remove_at(i)
 			f["ready"] = true
 			_popup(tg.pos + Vector2(0.0, -30.0), "SMASH", GREEN, 20)
 			_shards(tg.pos, v, tg.color, 8, 470.0, 0.5)
+			_burst(tg.pos, tg.color, 14, 300.0)
+			_burst(tg.pos, WHITE, 6, 220.0)
+			shake = maxf(shake, 6.0)
+			hitstop = maxf(hitstop, 0.04)
+			bloom_level = minf(bloom_level + 0.3, 1.8)
 			_sfx("wave", 0.0, -8.0)
 			fp = f["pos"]
 	shot_ready = bool(duel_me.get("ready", true))
@@ -2320,7 +2565,9 @@ func _duel_try_fire(target: Vector2) -> void:
 		return
 	if float(duel_me["cd"]) > 0.0:
 		return
-	_burst((duel_me["pos"] as Vector2) + (target - (duel_me["pos"] as Vector2)).normalized() * (BALL_R + 8.0), GOLD, 6, 160.0)
+	var mz := (duel_me["pos"] as Vector2) + (target - (duel_me["pos"] as Vector2)).normalized() * (BALL_R + 8.0)
+	_burst(mz, GOLD, 6, 160.0)
+	_ring(mz, GOLD, 6, 200.0)
 	if int(duel_me.get("hp", 0)) <= 0 or bool(duel_me.get("gone", false)):
 		return
 	if net_mode == "host":
