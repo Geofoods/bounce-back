@@ -851,6 +851,35 @@ func _is_mobile() -> bool:
 	return OS.has_feature("web") or OS.get_name() == "Android" or OS.get_name() == "iOS"
 
 
+func _is_phone_browser() -> bool:
+	if OS.has_feature("web"):
+		return bool(JavaScriptBridge.eval("/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 0 && /Macintosh/.test(navigator.userAgent))"))
+	return OS.get_name() == "Android" or OS.get_name() == "iOS"
+
+
+func _try_mobile_fullscreen() -> void:
+	if not _is_phone_browser():
+		return
+	if (name_edit != null and name_edit.has_focus()) or (ip_edit != null and ip_edit.has_focus()):
+		return
+	if OS.has_feature("web"):
+		JavaScriptBridge.eval("""
+			(function() {
+				if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
+					return;
+				}
+				var el = document.documentElement;
+				var req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+				if (req && !document.fullscreenElement && !document.webkitFullscreenElement) {
+					req.call(el).catch(function() {});
+				}
+				window.scrollTo(0, 1);
+			})();
+		""")
+	if DisplayServer.window_get_mode() != DisplayServer.WINDOW_MODE_FULLSCREEN:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+
+
 ## Skin helpers by index, so the customize carousel can preview neighbours.
 func _skin_face_tex(idx: int) -> Texture2D:
 	var i := idx - BALL_SKINS.size()
@@ -2031,6 +2060,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	var st := event as InputEventScreenTouch
 	if st:
 		mouse_seen = true
+		if st.pressed:
+			_try_mobile_fullscreen()
 		if st.pressed and mode != "play":
 			_menu_tap(st.position)
 			return
@@ -2102,6 +2133,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if mb and mb.button_index == MOUSE_BUTTON_LEFT:
 		if mb.pressed:
+			_try_mobile_fullscreen()
 			if mode == "play":
 				# Same priority for the mouse: the fixed joystick zone never
 				# starts a bounce charge, even while the stick is held.
