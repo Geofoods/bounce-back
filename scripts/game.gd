@@ -291,8 +291,6 @@ var duel_my_name := ""    # my versus display name; blank falls back to YOU/FOE 
 var name_focused := false  # typing into the name box (multiplayer menu/join screens)
 var name_edit: LineEdit  # real name field floating over the drawn lobby panels
 var ip_edit: LineEdit  # real address field floating over the drawn join panel
-var _ensure_name_edit := false
-var _ensure_ip_edit := false
 var duel_peer_names := {}  # host-side: peer id -> cleaned name sent via _net_hello
 var net_ip_rects: Array = []  # clickable host-screen address lines ({rect, text})
 var net_copied_at := -99.0    # t when an address was last copied to the clipboard
@@ -444,9 +442,6 @@ func _setup_net_edits() -> void:
 	ip_edit.focus_exited.connect(_on_ip_focus.bind(false))
 	ip_edit.visible = false
 	add_child(ip_edit)
-	_ensure_name_edit = on_mobile
-	_ensure_ip_edit = on_mobile
-	# Keyboard is requested by the focused LineEdit via grab_focus(); nothing to force here.
 
 
 ## Dark lobby styling for a net LineEdit: dim border idle, cyan on focus.
@@ -479,11 +474,9 @@ func _update_net_edits() -> void:
 			name_edit.add_theme_font_size_override("font_size", 17 if rect == NET_NAME_RECT_SM else 22)
 			if not name_edit.has_focus() and name_edit.text != duel_my_name:
 				name_edit.text = duel_my_name
-			if _ensure_name_edit:
-				name_edit.editable = true
-			if _ensure_name_edit:
-				if not name_edit.has_focus():
-					name_edit.grab_focus()
+			name_edit.editable = true
+		elif name_edit.has_focus():
+			name_edit.release_focus()
 	if ip_edit != null:
 		ip_edit.visible = want_ip
 		if want_ip:
@@ -492,11 +485,9 @@ func _update_net_edits() -> void:
 			ip_edit.add_theme_font_size_override("font_size", 24)
 			if not ip_edit.has_focus() and ip_edit.text != join_ip:
 				ip_edit.text = join_ip
-			if _ensure_ip_edit:
-				ip_edit.editable = true
-			if _ensure_ip_edit:
-				if not ip_edit.has_focus():
-					ip_edit.grab_focus()
+			ip_edit.editable = true
+		elif ip_edit.has_focus():
+			ip_edit.release_focus()
 
 
 func _on_name_changed(new_text: String) -> void:
@@ -1980,6 +1971,8 @@ func _net_click(mp: Vector2) -> void:
 			net_screen = "join"
 			if OS.has_feature("web"):
 				net_transport = "ws"
+			if ip_edit != null:
+				ip_edit.grab_focus()
 		else:
 			name_focused = false
 	elif net_screen == "host" and net_mode == "host":
@@ -2182,6 +2175,9 @@ func _unhandled_input(event: InputEvent) -> void:
 					_net_restart_request.rpc_id(1)
 			elif key.keycode == KEY_F and mode == "play":
 				_duel_try_fire(mouse_pos)
+			elif net_screen == "join" and ip_edit != null:
+				if not ip_edit.has_focus():
+					ip_edit.grab_focus()
 		if mode == "play" and key.keycode == KEY_SPACE:
 			# Armed in versus: space fires the held gun. Otherwise it
 			# charges/releases a launch exactly like the mouse button.
