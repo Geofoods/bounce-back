@@ -424,6 +424,7 @@ func _setup_net_edits() -> void:
 	name_edit.text_submitted.connect(_on_name_submitted)
 	name_edit.focus_entered.connect(_on_name_focus.bind(true))
 	name_edit.focus_exited.connect(_on_name_focus.bind(false))
+	name_edit.gui_input.connect(_on_name_gui_input)
 	name_edit.visible = false
 	add_child(name_edit)
 	ip_edit = LineEdit.new()
@@ -440,6 +441,7 @@ func _setup_net_edits() -> void:
 	ip_edit.text_submitted.connect(_on_ip_submitted)
 	ip_edit.focus_entered.connect(_on_ip_focus.bind(true))
 	ip_edit.focus_exited.connect(_on_ip_focus.bind(false))
+	ip_edit.gui_input.connect(_on_ip_gui_input)
 	ip_edit.visible = false
 	add_child(ip_edit)
 
@@ -516,6 +518,65 @@ func _on_name_focus(on: bool) -> void:
 
 func _on_ip_focus(on: bool) -> void:
 	join_focused = on
+
+
+func _on_name_gui_input(event: InputEvent) -> void:
+	if not (_is_phone_browser() and OS.has_feature("web")):
+		return
+	var st := event as InputEventScreenTouch
+	if st and st.pressed:
+		_mobile_prompt_name()
+		get_viewport().set_input_as_handled()
+		return
+	var mb := event as InputEventMouseButton
+	if mb and mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
+		_mobile_prompt_name()
+		get_viewport().set_input_as_handled()
+		return
+
+
+func _on_ip_gui_input(event: InputEvent) -> void:
+	if not (_is_phone_browser() and OS.has_feature("web")):
+		return
+	var st := event as InputEventScreenTouch
+	if st and st.pressed:
+		_mobile_prompt_ip()
+		get_viewport().set_input_as_handled()
+		return
+	var mb := event as InputEventMouseButton
+	if mb and mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
+		_mobile_prompt_ip()
+		get_viewport().set_input_as_handled()
+		return
+
+
+func _mobile_prompt_ip() -> void:
+	if not OS.has_feature("web"):
+		return
+	_release_net_edits()
+	var js := "prompt('Enter Host / WebSocket Address (ws://...):', " + JSON.stringify(join_ip) + ");"
+	var res = JavaScriptBridge.eval(js)
+	if res != null and typeof(res) == TYPE_STRING:
+		var s := (res as String).strip_edges()
+		if s != "":
+			join_ip = s
+			if ip_edit != null:
+				ip_edit.text = join_ip
+
+
+func _mobile_prompt_name() -> void:
+	if not OS.has_feature("web"):
+		return
+	_release_net_edits()
+	var js := "prompt('Enter Your Name (max 12 characters):', " + JSON.stringify(duel_my_name) + ");"
+	var res = JavaScriptBridge.eval(js)
+	if res != null and typeof(res) == TYPE_STRING:
+		var s := _net_clean_name((res as String).strip_edges().left(12))
+		if s != "":
+			duel_my_name = s
+			if name_edit != null:
+				name_edit.text = duel_my_name
+			_save_custom()
 
 
 ## Drops focus from both net fields without hiding them (they hide
@@ -1981,6 +2042,9 @@ func _net_click(mp: Vector2) -> void:
 		return
 	if net_screen == "menu":
 		if name_edit != null and NET_NAME_RECT.has_point(mp):
+			if _is_phone_browser() and OS.has_feature("web"):
+				_mobile_prompt_name()
+				return
 			name_edit.grab_focus()
 			return
 		if not OS.has_feature("web") and BTN_NET_HOST.has_point(mp):
@@ -2000,12 +2064,15 @@ func _net_click(mp: Vector2) -> void:
 			net_screen = "join"
 			if OS.has_feature("web"):
 				net_transport = "ws"
-			if ip_edit != null:
+			if ip_edit != null and not _is_phone_browser():
 				ip_edit.grab_focus()
 		else:
 			name_focused = false
 	elif net_screen == "host" and net_mode == "host":
 		if name_edit != null and NET_NAME_RECT_SM.has_point(mp):
+			if _is_phone_browser() and OS.has_feature("web"):
+				_mobile_prompt_name()
+				return
 			name_edit.grab_focus()
 			return
 		for e in net_ip_rects:
@@ -2017,9 +2084,15 @@ func _net_click(mp: Vector2) -> void:
 			duel_host_plays = not duel_host_plays
 	elif net_screen == "join":
 		if name_edit != null and NET_NAME_RECT.has_point(mp):
+			if _is_phone_browser() and OS.has_feature("web"):
+				_mobile_prompt_name()
+				return
 			name_edit.grab_focus()
 			return
 		if ip_edit != null and NET_IP_RECT.has_point(mp):
+			if _is_phone_browser() and OS.has_feature("web"):
+				_mobile_prompt_ip()
+				return
 			ip_edit.grab_focus()
 			return
 		_release_net_edits()
@@ -2035,6 +2108,9 @@ func _net_click(mp: Vector2) -> void:
 			_net_join(join_ip)
 	elif net_screen == "ready" and net_mode == "host":
 		if name_edit != null and NET_NAME_RECT_SM.has_point(mp):
+			if _is_phone_browser() and OS.has_feature("web"):
+				_mobile_prompt_name()
+				return
 			name_edit.grab_focus()
 			return
 		if BTN_NET_ROLE2.has_point(mp):
@@ -2044,7 +2120,11 @@ func _net_click(mp: Vector2) -> void:
 			_net_roulette_start()
 	elif net_screen == "ready":
 		if name_edit != null and NET_NAME_RECT_SM.has_point(mp):
+			if _is_phone_browser() and OS.has_feature("web"):
+				_mobile_prompt_name()
+				return
 			name_edit.grab_focus()
+			return
 
 
 # ------------------------------------------------------------------ input
@@ -2208,7 +2288,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif key.keycode == KEY_F and mode == "play":
 				_duel_try_fire(mouse_pos)
 			elif net_screen == "join" and ip_edit != null:
-				if not ip_edit.has_focus():
+				if _is_phone_browser() and OS.has_feature("web"):
+					_mobile_prompt_ip()
+				elif not ip_edit.has_focus():
 					ip_edit.grab_focus()
 		if mode == "play" and key.keycode == KEY_SPACE:
 			# Armed in versus: space fires the held gun. Otherwise it
