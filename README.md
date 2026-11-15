@@ -40,7 +40,7 @@ Title → MULTIPLAYER: one player HOSTs, the other JOINs with the host's IP
 the YOUR NAME box first (blank stays YOU, rivals who skip it show as
 FOE) — names ride with the roster and show over fighters, in the
 corners, and on the winners screen. Versus is a duel in a sharedarena: every fighter has 100 HP. Breaking a chest instantly equips
-PISTOL, then SPREAD once armed — no pickup walk-over. Fresh crates drop
+one of 4 guns — rapid ASSAULT, 5-pellet BLASTER scatter, piercing LASER bolt, or a siege RAILGUN slug that punches through fighters and crates — no pickup walk-over. Fresh crates drop
 into the arena every few seconds.The molten floor burns fighters that touch it (15 damage per second). Shoot the rivals (RMB or F toward the cursor). Any number of fighters share one arena (rivals join freely; the host may also sit out and spectate) — knock everyone
 else out to win — only the last fighter standing takes it. If the 60s clock runs out with two or more fighters alive, the round is a draw. Hitting START spins a Fall-Guys-style map roulette: five arenas (OPEN FIELD, PILLARS, CROSSROADS, TWIN GATES, STAR FORT) scroll past and land on a random one — simple polygonic slabs everyone collides with, drawn in neon, with spawns, balls, crates and bullets all playing around them.
 If you die while the round goes on, you spectate: the camera follows the

@@ -11,6 +11,7 @@ extends Node2D
 const VIEW := Vector2(1280.0, 720.0)
 const WORLD := Rect2(0.0, 0.0, 3840.0, 2560.0)   # ~9 screens of playfield
 const BALL_R := 15.0
+const LIGHT_RADIUS := 420.0  # how far your ball's lamp reaches (world units)
 
 const CAM_LERP := 4.6            # camera follow stiffness (higher = tighter)
 const CAM_LOOKAHEAD := 0.26      # how far ahead of the ball the camera leads
@@ -89,8 +90,8 @@ const PURPLE := Color(0.65, 0.55, 0.98)
 const BALL_SKINS := [CYAN, PINK, GOLD, GREEN, PURPLE]
 const BALL_NAMES := ["CYAN", "PINK", "GOLD", "GREEN", "PURPLE"]
 # Photo ball skins: circular portraits drawn over the ball.
-const BALL_FACE_PATHS := ["res://images (2)-modified.png", "res://Kai_Cenat-modified.png", "res://LacyHimself-modified.png", "res://Rayasianboy_2025-modified.png"]
-const BALL_FACE_NAMES := ["MARLON", "KAI", "LACY", "RAY"]
+const BALL_FACE_PATHS := ["res://images (2)-modified.png", "res://Kai_Cenat-modified.png", "res://LacyHimself-modified.png", "res://Rayasianboy_2025-modified.png", "res://OIP (17)-modified.png"]
+const BALL_FACE_NAMES := ["MARLON", "KAI", "LACY", "RAY", "RAKAI"]
 const HOST_QR_PATH := "res://bing_generated_qrcode.png"
 const CUSTOM_LABELS := ["BALL", "TRAIL", "SHAKE", "GLOW", "SOUND", "MOBILE"]
 const BTN_START := Rect2(490.0, 532.0, 300.0, 56.0)
@@ -98,11 +99,11 @@ const BTN_CUSTOM := Rect2(413.0, 596.0, 146.0, 40.0)
 const BTN_SETTINGS := Rect2(721.0, 596.0, 146.0, 40.0)
 const BTN_BACK := Rect2(540.0, 596.0, 200.0, 44.0)
 # Main-menu chrome (BO3-style left column). Versus screens keep BTN_* above.
-const TITLE_PLAY := Rect2(110.0, 330.0, 300.0, 50.0)
-const TITLE_MULTI := Rect2(110.0, 388.0, 300.0, 50.0)
-const TITLE_CUSTOM := Rect2(110.0, 446.0, 300.0, 50.0)
-const TITLE_SETTINGS := Rect2(110.0, 504.0, 300.0, 50.0)
-const TITLE_QUIT := Rect2(110.0, 562.0, 300.0, 50.0)
+const TITLE_PLAY := Rect2(110.0, 196.0, 300.0, 50.0)
+const TITLE_MULTI := Rect2(110.0, 254.0, 300.0, 50.0)
+const TITLE_CUSTOM := Rect2(110.0, 312.0, 300.0, 50.0)
+const TITLE_SETTINGS := Rect2(110.0, 370.0, 300.0, 50.0)
+const TITLE_QUIT := Rect2(110.0, 428.0, 300.0, 50.0)
 # Online versus (mirrored arenas, Godot ENet, no outside services).
 const NET_PORT := 7777
 const BTN_NET := Rect2(567.0, 596.0, 146.0, 40.0)
@@ -110,11 +111,12 @@ const BTN_NET_HOST := Rect2(440.0, 280.0, 196.0, 56.0)
 const BTN_NET_HOST_WS := Rect2(644.0, 280.0, 196.0, 56.0)
 const BTN_NET_JOIN := Rect2(440.0, 348.0, 400.0, 52.0)
 const BTN_NET_PROTO := Rect2(490.0, 486.0, 300.0, 30.0)
+const BTN_NET_BALL := Rect2(440.0, 522.0, 400.0, 34.0)
 const BTN_NET_ROLE := Rect2(490.0, 510.0, 300.0, 44.0)
 const BTN_NET_ROLE2 := Rect2(490.0, 360.0, 300.0, 44.0)
 const NET_IP_RECT := Rect2(440.0, 280.0, 400.0, 48.0)
 const NET_NAME_RECT := Rect2(440.0, 410.0, 400.0, 40.0)
-const NET_NAME_RECT_SM := Rect2(490.0, 232.0, 300.0, 36.0)
+const NET_NAME_RECT_SM := Rect2(490.0, 218.0, 300.0, 36.0)
 const GREEN := Color(0.56, 0.97, 0.76)
 const RED := Color(1.0, 0.25, 0.42)
 const DIM := Color(0.62, 0.76, 0.95, 0.62)
@@ -204,6 +206,7 @@ var _ui_key := ""  # mode|net_screen combo ui_t measures
 # post fx
 var bloom_level: float = 0.35
 var vignette_t: float = 0.2
+var vignette_pulse: float = 0.0
 var glow_env: Environment
 var vignette_tex: ImageTexture
 
@@ -218,11 +221,12 @@ var ball_flash: float = 0.0
 var trail: Array = []
 
 var ball_faces: Array = []
+var duel_gun_texs: Array = []
 var host_qr_tex: Texture2D
 
 var charging: bool = false
 var charge_t: float = 0.0
-var shot_ready: bool = true       # only one launch per ball hit
+var shot_ready: bool = true       # one launch per collision: any wall, bumper or ball reloads
 var ready_nudge_t: float = 0.0
 var mouse_pos: Vector2 = Vector2.ZERO
 var mouse_seen: bool = false
@@ -267,10 +271,19 @@ var net_copied_at := -99.0    # t when an address was last copied to the clipboa
 # duel (versus shooter): host-authoritative shared arena, 100 HP each.
 const DUEL_TIME := 60.0
 const DUEL_HP := 100
-const DUEL_GUN_NAMES := ["FISTS", "PISTOL", "SPREAD"]
+const DUEL_GUN_NAMES := ["FISTS", "ASSAULT", "BLASTER", "LASER", "RAILGUN"]
+const DUEL_GUN_PATHS := ["", "res://assault rifle.png", "res://blaster.png", "res://laser.png", "res://railgun.png"]
+const DUEL_GUN_COLS := [Color(1.0, 1.0, 1.0), Color(0.55, 0.90, 1.0), Color(1.0, 0.60, 0.25), Color(0.50, 1.0, 0.90), Color(1.0, 0.85, 0.30)]
+const DUEL_GUN_CD := [0.0, 0.16, 0.7, 0.9, 1.5]          # trigger cooldown per gun
+const DUEL_GUN_DMG := [0, 6, 5, 16, 34]                 # damage per round
+const DUEL_GUN_SPD := [0.0, 2000.0, 1750.0, 3200.0, 900.0]  # muzzle velocity
+const DUEL_GUN_LIFE := [0.0, 1.2, 1.2, 1.0, 2.4]        # round lifetime, seconds
+const DUEL_GUN_RECOIL := [0.0, 60.0, 150.0, 120.0, 320.0]   # backward kick, px/s
+const DUEL_GUN_PELLETS := [0, 1, 5, 1, 1]               # rounds per pull
+const DUEL_GUN_SPREAD := [0.0, 0.0, 0.22, 0.0, 0.0]     # cone half-angle, radians
+const DUEL_GUN_KIND := [0, 0, 0, 1, 2]                  # 0 slug, 1 beam bolt, 2 rail slug (pierces foes; rail also crates)
 const DUEL_BULLET_R := 10.0  # versus bullet body radius: chunky, easier to read and land
-const DUEL_RECOIL_PISTOL := 130.0  # backward kick per pistol shot, px/s
-const DUEL_RECOIL_SPREAD := 170.0  # backward kick per spread pull, px/s
+
 const DUEL_SNAP_T := 1.0 / 20.0
 const DUEL_CHEST_HP := 25
 const DUEL_CHEST_RESPAWN_T := 5.0   # host drops a fresh crate this often
@@ -343,6 +356,7 @@ func _ready() -> void:
 	_setup_audio()
 	_setup_post_fx()
 	_setup_ball_faces()
+	_setup_duel_guns()
 	_setup_host_qr()
 	_setup_net_edits()
 	_load_best()
@@ -530,6 +544,33 @@ func _setup_ball_faces() -> void:
 			ball_faces.append(null)
 
 
+## Versus gun sprites from res://. Loaded once; a missing file leaves that
+## gun's badge empty and the game falls back to colored rounds.
+func _setup_duel_guns() -> void:
+	duel_gun_texs.clear()
+	for p in DUEL_GUN_PATHS:
+		if p != "" and ResourceLoader.exists(p):
+			var tex: Texture2D = load(p)
+			duel_gun_texs.append(tex)
+		else:
+			duel_gun_texs.append(null)
+
+
+## Gun badge: sprite scaled to fit a size x size box, centered. Nothing
+## draws when the slot has no file, so art is optional, never fatal.
+func _draw_gun_icon(gun: int, center: Vector2, size: float) -> void:
+	if gun <= 0 or gun >= duel_gun_texs.size():
+		return
+	var tex: Texture2D = duel_gun_texs[gun]
+	if tex == null:
+		return
+	var s := tex.get_size()
+	if s.x <= 0.0 or s.y <= 0.0:
+		return
+	var sc := size / maxf(s.x, s.y)
+	draw_texture_rect(tex, Rect2(center - s * sc * 0.5, s * sc), false)
+
+
 func _setup_fonts() -> void:
 	body_font = ThemeDB.fallback_font
 	var bv := FontVariation.new()
@@ -548,7 +589,7 @@ func _setup_post_fx() -> void:
 	env.glow_strength = 1.0
 	env.glow_bloom = 0.12
 	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
-	env.glow_hdr_threshold = 0.90
+	env.glow_hdr_threshold = 0.72
 	env.glow_hdr_scale = 2.0
 	var we := WorldEnvironment.new()
 	we.environment = env
@@ -573,34 +614,42 @@ func _make_vignette() -> ImageTexture:
 
 
 ## 0 when calm, 1 when the ball is near the lava or the clock is nearly out.
+## In versus the danger is our own hurt: the lower our hull, the harder the
+## frame closes in.
 func _danger_level() -> float:
 	if mode == "over":
 		return 1.0
 	if mode != "play":
 		return 0.2
+	if net_mode != "off" and not duel_me.is_empty():
+		if duel_over:
+			return 1.0
+		return clampf(1.0 - float(duel_me.get("hp", 100)) / 100.0, 0.0, 1.0)
 	var near_lava := clampf((ball_pos.y - (_lava_top() - 760.0)) / 760.0, 0.0, 1.0)
 	var low_time := 1.0 - clampf(time_left / START_TIME, 0.0, 1.0)
 	return clampf(maxf(near_lava, low_time * 0.85), 0.0, 1.0)
 
 
-## Bloom swells while charging, while chaining, and while in danger; the
-## vignette closes in with the same danger and flares red at the edges.
+## Bloom swells while charging, while chaining, while firing, and while in
+## danger; the vignette closes in with the same danger, kicks with every
+## bounce, kill and hit, and flares red at the edges.
 func _update_post_fx(dt: float) -> void:
 	var danger := _danger_level()
 	if glow_env != null:
 		glow_env.glow_enabled = glow_opt
-		var target := 0.35
+		var target := 0.5
 		if mode == "play":
-			target += 0.45 * (clampf(charge_t / CHARGE_TIME, 0.0, 1.0) if charging else 0.0)
-			target += 0.04 * minf(combo, 8)
-			target += 0.30 * danger
+			target += 0.8 * (clampf(charge_t / CHARGE_TIME, 0.0, 1.0) if charging else 0.0)
+			target += 0.08 * minf(combo, 8)
+			target += 0.6 * danger
 		elif mode == "title":
-			target = 0.42 + 0.10 * sin(t * 1.7)
-		bloom_level = lerpf(bloom_level, clampf(target, 0.15, 1.5), 1.0 - exp(-6.0 * dt))
+			target = 0.5 + 0.12 * sin(t * 1.7)
+		bloom_level = lerpf(bloom_level, clampf(target, 0.15, 2.2), 1.0 - exp(-6.0 * dt))
 		glow_env.glow_intensity = bloom_level
-		glow_env.glow_bloom = 0.08 + bloom_level * 0.10
-		glow_env.glow_strength = 0.85 + bloom_level * 0.5
+		glow_env.glow_bloom = 0.10 + bloom_level * 0.14
+		glow_env.glow_strength = 0.9 + bloom_level * 0.6
 	vignette_t = lerpf(vignette_t, danger, 1.0 - exp(-5.0 * dt))
+	vignette_pulse = maxf(0.0, vignette_pulse - dt * 1.8)
 
 
 func _draw_vignette() -> void:
@@ -608,11 +657,12 @@ func _draw_vignette() -> void:
 		return
 	var charge := clampf(charge_t / CHARGE_TIME, 0.0, 1.0) if charging else 0.0
 	# Play runs a heavier frame than the menus so the darkening reads in game.
-	var base := 0.56 if mode == "play" else 0.38
-	var strength := base + 0.32 * vignette_t + 0.08 * charge
-	var tint := Color(0.0, 0.0, 0.02).lerp(Color(0.34, 0.03, 0.05), vignette_t)
+	var base := 0.66 if mode == "play" else 0.44
+	var heat := clampf(vignette_t + vignette_pulse * 0.6, 0.0, 1.0)
+	var strength := base + 0.42 * vignette_t + 0.18 * charge + vignette_pulse
+	var tint := Color(0.0, 0.0, 0.03).lerp(Color(0.55, 0.06, 0.10), heat)
 	draw_texture_rect(vignette_tex, Rect2(Vector2.ZERO, VIEW), false,
-		Color(tint.r, tint.g, tint.b, clampf(strength, 0.0, 0.95)))
+		Color(tint.r, tint.g, tint.b, clampf(strength, 0.0, 0.98)))
 
 
 func _setup_audio() -> void:
@@ -1235,8 +1285,7 @@ func _duel_reset(roster: Array = [], names: Array = [], map_idx: int = -1) -> vo
 	stick_id = -1
 	stick_mouse = false
 	var offs := [Vector2(-260.0, -160.0), Vector2(260.0, -160.0), Vector2(-260.0, 160.0), Vector2(260.0, 160.0), Vector2(0.0, -340.0), Vector2(0.0, 340.0)]
-	for k in (4 if n <= 2 else 6):
-		duel_chests.append({"pos": _duel_clear_spot(c + offs[k], 70.0), "hp": DUEL_CHEST_HP})
+	for k in (4 if n <= 2 else 6):			duel_chests.append({"pos": _duel_clear_spot(c + offs[k], 70.0), "hp": DUEL_CHEST_HP, "gun": 1 + randi() % 4})
 	duel_chest_max = (4 if n <= 2 else 6) + 2
 	duel_chest_t = DUEL_CHEST_RESPAWN_T
 	duel_snap_t = 0.0
@@ -1393,10 +1442,10 @@ func _net_duel(state: Array) -> void:
 	# Unpack the flat bullet wire format back into sim dicts.
 	var bf2: Array = state[1]
 	var fresh: Array = []
-	for i in range(0, bf2.size(), 7):
-		if i + 6 >= bf2.size():
+	for i in range(0, bf2.size(), 8):
+		if i + 7 >= bf2.size():
 			break
-		fresh.append({"pos": Vector2(float(bf2[i]), float(bf2[i + 1])), "vel": Vector2(float(bf2[i + 2]), float(bf2[i + 3])), "owner": int(bf2[i + 4]), "life": float(bf2[i + 5]), "dmg": int(bf2[i + 6])})
+		fresh.append({"pos": Vector2(float(bf2[i]), float(bf2[i + 1])), "vel": Vector2(float(bf2[i + 2]), float(bf2[i + 3])), "owner": int(bf2[i + 4]), "life": float(bf2[i + 5]), "dmg": int(bf2[i + 6]), "kind": int(bf2[i + 7]), "hit": []})
 	var old_bl: Array = duel_bullets
 	var smooth: Array = []
 	var used: Array = []
@@ -1408,7 +1457,7 @@ func _net_duel(state: Array) -> void:
 			if used.has(oi):
 				continue
 			var ob: Dictionary = old_bl[oi]
-			if int(ob.get("owner", -9)) == int(nd.get("owner", -9)) and (ob["vel"] as Vector2).distance_squared_to(nd["vel"] as Vector2) < 1.0:
+			if int(ob.get("owner", -9)) == int(nd.get("owner", -9)) and int(ob.get("kind", 0)) == int(nd.get("kind", 0)) and (ob["vel"] as Vector2).distance_squared_to(nd["vel"] as Vector2) < 1.0:
 				found = oi
 				break
 		if found < 0:
@@ -1422,7 +1471,7 @@ func _net_duel(state: Array) -> void:
 				if used.has(oi2):
 					continue
 				var ob4: Dictionary = old_bl[oi2]
-				if int(ob4.get("owner", -9)) != int(nd.get("owner", -9)):
+				if int(ob4.get("owner", -9)) != int(nd.get("owner", -9)) or int(ob4.get("kind", 0)) != int(nd.get("kind", 0)):
 					continue
 				var dd3: float = (ob4["pos"] as Vector2).distance_squared_to(nd["pos"] as Vector2)
 				if dd3 < near_d2:
@@ -1432,7 +1481,7 @@ func _net_duel(state: Array) -> void:
 		if found >= 0:
 			used.append(found)
 			var ob2: Dictionary = old_bl[found]
-			smooth.append({"pos": (ob2["pos"] as Vector2).lerp(nd["pos"], 0.5), "vel": nd["vel"], "owner": nd["owner"], "life": nd["life"], "dmg": nd["dmg"]})
+			smooth.append({"pos": (ob2["pos"] as Vector2).lerp(nd["pos"], 0.5), "vel": nd["vel"], "owner": nd["owner"], "life": nd["life"], "dmg": nd["dmg"], "kind": nd.get("kind", 0), "hit": []})
 		else:
 			# Someone else just pulled the trigger: flash its muzzle the way
 			# the shooter's screen does. Our own predicted shots always
@@ -1460,10 +1509,10 @@ func _net_duel(state: Array) -> void:
 	# just dropped in: replay both, same as the host sees in its sim.
 	var cf2: Array = state[2]
 	var new_chests: Array = []
-	for i in range(0, cf2.size(), 3):
-		if i + 2 >= cf2.size():
+	for i in range(0, cf2.size(), 4):
+		if i + 3 >= cf2.size():
 			break
-		new_chests.append({"pos": Vector2(float(cf2[i]), float(cf2[i + 1])), "hp": int(cf2[i + 2])})
+		new_chests.append({"pos": Vector2(float(cf2[i]), float(cf2[i + 1])), "hp": int(cf2[i + 2]), "gun": int(cf2[i + 3])})
 	if not duel_chests.is_empty():
 		for ch in duel_chests:
 			var cp: Vector2 = ch["pos"]
@@ -1582,7 +1631,6 @@ func _net_duel(state: Array) -> void:
 			_burst(sp, sc, 12, 280.0)
 			_ring(sp, sc, 8, 220.0)
 			_shards(sp, Vector2.ZERO, sc, 8, 470.0, 0.5)
-			_popup(sp + Vector2(0.0, -30.0), "SMASH", GREEN, 20)
 			hitstop = maxf(hitstop, 0.04)
 			if sp.distance_to(ball_pos) < 700.0:
 				shake = maxf(shake, 4.0)
@@ -1600,7 +1648,8 @@ func _duel_end(winner: int) -> void:
 	mode = "over"
 	charging = false
 	charge_t = 0.0
-	bloom_level = maxf(bloom_level, 1.4)
+	bloom_level = maxf(bloom_level, 1.8)
+	vignette_pulse = minf(vignette_pulse + 0.6, 0.9)
 	_ring(ball_pos, PINK, 18, 320.0)
 	shake = maxf(shake, 14.0)
 	_sfx("over", 0.0, -4.0)
@@ -1722,7 +1771,9 @@ func _net_click(mp: Vector2) -> void:
 			ip_edit.grab_focus()
 			return
 		_release_net_edits()
-		if not OS.has_feature("web") and BTN_NET_PROTO.has_point(mp):
+		if BTN_NET_BALL.has_point(mp):
+			_cycle_custom(0)
+		elif not OS.has_feature("web") and BTN_NET_PROTO.has_point(mp):
 			net_transport = "ws" if net_transport == "enet" else "enet"
 		elif BTN_NET_JOIN.has_point(mp):
 			_net_join(join_ip)
@@ -1996,7 +2047,8 @@ func _game_over() -> void:
 		best = score
 		new_best = true
 		_save_best()
-	bloom_level = maxf(bloom_level, 1.4)
+	bloom_level = maxf(bloom_level, 1.8)
+	vignette_pulse = minf(vignette_pulse + 0.6, 0.9)
 	_ring(ball_pos, PINK, 18, 320.0)
 	shake = 14.0
 	_sfx("over", 0.0, -4.0)
@@ -2013,8 +2065,9 @@ func _begin_charge() -> void:
 		return
 	if autoaim:
 		return
-	# The launch is spent until the ball hits another ball. In the duel each
-	# fighter reloads on its own ball smashes, tracked on the fighter dict.
+	# The launch is spent until the ball hits something: any wall, bumper
+	# or ball reloads it. In the duel each fighter reloads on its own
+	# ball smashes, tracked on the fighter dict.
 	var can_shoot := shot_ready
 	if mode == "play" and net_mode != "off":
 		can_shoot = bool(duel_me.get("ready", true))
@@ -2053,6 +2106,8 @@ func _fire() -> void:
 	if dir.length() < 1.0:
 		dir = Vector2.RIGHT
 	ball_vel = dir.normalized() * power
+	bloom_level = minf(bloom_level + 0.15 + p * 0.25, 2.2)
+	vignette_pulse = minf(vignette_pulse + 0.08 + p * 0.12, 0.9)
 	if net_mode != "off" and mode == "play":
 		duel_me["vel"] = ball_vel
 		duel_me["ready"] = false
@@ -2329,7 +2384,8 @@ func _kill_target(idx: int, speed: float) -> void:
 	_burst(tg.pos, WHITE, 8, 220.0)
 	shake = maxf(shake, 9.0)
 	hitstop = 0.055
-	bloom_level = minf(bloom_level + 0.5, 1.8)
+	bloom_level = minf(bloom_level + 0.8, 2.2)
+	vignette_pulse = minf(vignette_pulse + 0.30, 0.9)
 	_sfx("kill", 0.08, -6.0)
 	if autoaim:
 		auto_left -= 1
@@ -2544,7 +2600,7 @@ func _update_play(delta: float) -> void:
 # ------------------------------------------------------------------ duel
 ## Shared-arena versus shooter: both fighters in one world, host simulates,
 ## client commands launches/shots and predicts its own fighter. 100 HP each,
-## breaking a chest instantly equips PISTOL then SPREAD; last one standing wins.
+## breaking a chest instantly equips the gun sealed inside (assault, blaster, laser or railgun); last one standing wins.
 ## A 0s clock with two or more fighters alive is a draw: nobody wins without
 ## every rival dead.
 func _update_duel(delta: float) -> void:
@@ -2594,7 +2650,7 @@ func _update_duel(delta: float) -> void:
 			if duel_chests.size() < duel_chest_max:
 				var cp := _duel_chest_spot()
 				if cp != Vector2.INF:
-					duel_chests.append({"pos": cp, "hp": DUEL_CHEST_HP})
+					duel_chests.append({"pos": cp, "hp": DUEL_CHEST_HP, "gun": 1 + randi() % 4})
 					_ring(cp, GOLD, 10, 200.0)
 		if duel_was_alive and int(duel_me.get("hp", 0)) <= 0:
 			duel_was_alive = false
@@ -2660,6 +2716,7 @@ func _update_duel(delta: float) -> void:
 				bf.append(bd["owner"])
 				bf.append(bd["life"])
 				bf.append(bd["dmg"])
+				bf.append(int(bd.get("kind", 0)))
 			var cf: Array = []
 			for ch in duel_chests:
 				var chd: Dictionary = ch
@@ -2667,6 +2724,7 @@ func _update_duel(delta: float) -> void:
 				cf.append(cpp.x)
 				cf.append(cpp.y)
 				cf.append(chd["hp"])
+				cf.append(int(chd.get("gun", 1)))
 			var pf: Array = []
 			for pk in duel_pickups:
 				var pkd: Dictionary = pk
@@ -2858,12 +2916,15 @@ func _duel_clash_pair(fa: Dictionary, fb: Dictionary, authoritative := true) -> 
 
 
 ## Bullets fly straight, die on walls/expiry, and hit chests + any rival.
+## Beam bolts pierce fighters and rail slugs pierce fighters and crates;
+## piercers remember tagged fighters so one pass deals one hit each.
 func _duel_update_bullets(dt: float, authoritative: bool) -> void:
 	var keep: Array = []
 	var allf := _duel_all()
 	for b in duel_bullets:
 		var bp: Vector2 = b["pos"] + (b["vel"] as Vector2) * dt
 		var life: float = float(b["life"]) - dt
+		var kind := int(b.get("kind", 0))
 		var dead := life <= 0.0 or bp.x < WORLD.position.x or bp.x > WORLD.end.x or bp.y < WORLD.position.y or bp.y > _lava_top()
 		if not dead and authoritative:
 			for i in duel_chests.size():
@@ -2872,8 +2933,9 @@ func _duel_update_bullets(dt: float, authoritative: bool) -> void:
 					var oi := int(b["owner"])
 					var bf: Dictionary = allf[oi] if oi >= 0 and oi < allf.size() else {}
 					_duel_damage_chest(i, int(b["dmg"]), bf)
-					dead = true
-					break
+					if kind != 2:
+						dead = true
+						break
 		if not dead and authoritative:
 			for i in allf.size():
 				if i == int(b["owner"]):
@@ -2882,13 +2944,20 @@ func _duel_update_bullets(dt: float, authoritative: bool) -> void:
 				if int(foe.get("hp", 0)) <= 0:
 					continue
 				if bp.distance_to(foe["pos"]) < BALL_R + DUEL_BULLET_R:
+					var hitlist: Array = b.get("hit", [])
+					if hitlist.has(i):
+						continue
 					_duel_hurt(foe, int(b["dmg"]))
 					_burst(bp, PINK, 8, 200.0)
 					_ring(bp, PINK, 10, 260.0)
 					shake = maxf(shake, 4.0)
 					_sfx("bump", 0.05, -10.0)
-					dead = true
-					break
+					if kind == 1 or kind == 2:
+						hitlist.append(i)
+						b["hit"] = hitlist
+					else:
+						dead = true
+						break
 		if not dead and not duel_walls.is_empty() and _duel_point_blocked(bp, DUEL_BULLET_R + 6.0):
 			_burst(bp, CYAN, 6, 160.0)
 			_sfx("bump", 0.05, -14.0)
@@ -2912,9 +2981,9 @@ func _duel_update_pickups(authoritative: bool) -> void:
 			if int(ff.get("hp", 0)) <= 0:
 				continue
 			if (ff["pos"] as Vector2).distance_to(pk["pos"]) < 46.0:
-				ff["gun"] = maxi(int(ff["gun"]), int(pk["kind"]))
+				ff["gun"] = clampi(int(pk["kind"]), 1, 4)
 				ff["cd"] = 0.0
-				_popup((ff["pos"] as Vector2) + Vector2(0.0, -34.0), DUEL_GUN_NAMES[clampi(int(ff["gun"]), 0, 2)], CYAN, 16)
+				_popup((ff["pos"] as Vector2) + Vector2(0.0, -34.0), DUEL_GUN_NAMES[clampi(int(ff["gun"]), 0, 4)], CYAN, 16)
 				_sfx("wave", 0.0, -10.0)
 				taken = true
 				break
@@ -2923,9 +2992,10 @@ func _duel_update_pickups(authoritative: bool) -> void:
 	duel_pickups = keep
 
 
-## Breaking a chest equips its gun on the spot: PISTOL first, then SPREAD
-## once armed. No walk-over needed; a pickup only drops when the breaker is
-## already out (a stray bullet finishing the job after they died).
+## Breaking a chest equips the gun sealed inside on the spot (each crate
+## holds one of the 4 guns, shown on its face). No walk-over needed; a
+## pickup only drops when the breaker is already out (a stray bullet
+## finishing the job after they died).
 func _duel_damage_chest(i: int, dmg: int, breaker: Dictionary) -> void:
 	if i < 0 or i >= duel_chests.size():
 		return
@@ -2934,19 +3004,20 @@ func _duel_damage_chest(i: int, dmg: int, breaker: Dictionary) -> void:
 	if int(ch["hp"]) > 0:
 		return
 	duel_chests.remove_at(i)
+	var kind := clampi(int(ch.get("gun", 1)), 1, 4)
 	if not breaker.is_empty() and int(breaker.get("hp", 0)) > 0:
-		var kind := 2 if int(breaker.get("gun", 0)) > 0 else 1
 		breaker["gun"] = kind
 		breaker["cd"] = 0.0
-		_popup((breaker["pos"] as Vector2) + Vector2(0.0, -34.0), DUEL_GUN_NAMES[clampi(kind, 0, 2)], CYAN, 16)
+		_popup((breaker["pos"] as Vector2) + Vector2(0.0, -34.0), DUEL_GUN_NAMES[clampi(kind, 0, 4)], CYAN, 16)
 		_sfx("wave", 0.0, -10.0)
 	else:
-		duel_pickups.append({"pos": ch["pos"], "kind": 1})
+		duel_pickups.append({"pos": ch["pos"], "kind": kind})
 	_burst(ch["pos"], GOLD, 14, 260.0)
 	_ring(ch["pos"], GOLD, 12, 240.0)
 	shake = maxf(shake, 8.0)
 	hitstop = maxf(hitstop, 0.05)
-	bloom_level = minf(bloom_level + 0.3, 1.8)
+	bloom_level = minf(bloom_level + 0.5, 2.2)
+	vignette_pulse = minf(vignette_pulse + 0.20, 0.9)
 	_sfx("bump", 0.0, -6.0)
 
 
@@ -2957,6 +3028,12 @@ func _duel_hurt(f: Dictionary, dmg: int) -> void:
 	f["hp"] = maxi(0, old - dmg)
 	if int(f["hp"]) <= 0:
 		_duel_death_fx(f["pos"])
+	elif is_same(f, duel_me):
+		_burst(f["pos"], RED, 8, 260.0)
+		shake = maxf(shake, 6.0)
+		bloom_level = minf(bloom_level + 0.4, 2.2)
+		vignette_pulse = minf(vignette_pulse + 0.4, 0.9)
+		_sfx("armor", 0.0, -10.0)
 
 
 ## Shared elimination sendoff, solo-death style. The host spawns it in the
@@ -2968,7 +3045,8 @@ func _duel_death_fx(at: Vector2) -> void:
 	_popup(at + Vector2(0.0, -40.0), "ELIMINATED", RED, 22)
 	shake = maxf(shake, 12.0)
 	hitstop = maxf(hitstop, 0.08)
-	bloom_level = minf(bloom_level + 0.5, 1.8)
+	bloom_level = minf(bloom_level + 0.9, 2.2)
+	vignette_pulse = minf(vignette_pulse + 0.45, 0.9)
 	_sfx("kill", 0.08, -6.0)
 
 
@@ -2983,6 +3061,8 @@ func _duel_client_hurt_fx(pos: Vector2, old_hp: int, new_hp: int, is_me: bool) -
 		_burst(pos, RED, 6, 220.0)
 		if is_me:
 			shake = maxf(shake, 5.0)
+			bloom_level = minf(bloom_level + 0.4, 2.2)
+			vignette_pulse = minf(vignette_pulse + 0.4, 0.9)
 			_sfx("armor", 0.0, -10.0)
 
 
@@ -3280,13 +3360,13 @@ func _duel_smash_check(authoritative := true) -> void:
 				continue
 			targets.remove_at(i)
 			f["ready"] = true
-			_popup(tg.pos + Vector2(0.0, -30.0), "SMASH", GREEN, 20)
 			_shards(tg.pos, v, tg.color, 8, 470.0, 0.5)
 			_burst(tg.pos, tg.color, 14, 300.0)
 			_burst(tg.pos, WHITE, 6, 220.0)
 			shake = maxf(shake, 6.0)
 			hitstop = maxf(hitstop, 0.04)
-			bloom_level = minf(bloom_level + 0.3, 1.8)
+			bloom_level = minf(bloom_level + 0.5, 2.2)
+			vignette_pulse = minf(vignette_pulse + 0.15, 0.9)
 			_sfx("wave", 0.0, -8.0)
 			fp = f["pos"]
 	shot_ready = bool(duel_me.get("ready", true))
@@ -3301,19 +3381,22 @@ func _duel_finish(winner: int) -> void:
 	mode = "over"
 	charging = false
 	charge_t = 0.0
-	bloom_level = maxf(bloom_level, 1.4)
+	bloom_level = maxf(bloom_level, 1.8)
+	vignette_pulse = minf(vignette_pulse + 0.6, 0.9)
 	_ring(ball_pos, PINK, 18, 320.0)
 	shake = maxf(shake, 14.0)
 	_sfx("over", 0.0, -4.0)
 	_duel_end.rpc(winner)
 
 
-## Pistol and 3-pellet spread. Host spawns; no gun = hint only. Every
-## pull kicks the shooter backwards off the aim line, so firing has a
-## movement cost and you can't hose the trigger without drifting.
+## Assault sprays, blaster scatters 5 pellets, laser fires a piercing beam
+## bolt, railgun lobs a slow siege slug through fighters AND crates. Host
+## spawns; no gun = hint only. Every pull kicks the shooter backwards off
+## the aim line, so firing has a movement cost. Identical params on host
+## and predicting client, so the trigger feels instant with no duplicates.
 func _duel_spawn_shots(f: Dictionary, target: Vector2, owner: int = -1) -> void:
-	var gun := int(f["gun"])
-	if gun <= 0 or float(f["cd"]) > 0.0 or duel_over:
+	var gun := clampi(int(f.get("gun", 0)), 0, 4)
+	if gun <= 0 or float(f.get("cd", 0.0)) > 0.0 or duel_over:
 		return
 	if int(f.get("hp", 0)) <= 0:
 		return
@@ -3323,16 +3406,19 @@ func _duel_spawn_shots(f: Dictionary, target: Vector2, owner: int = -1) -> void:
 	if base.length_squared() < 1.0:
 		base = Vector2.RIGHT
 	base = base.normalized()
-	if gun == 1:
-		f["cd"] = 0.35
-		duel_bullets.append({"pos": f["pos"] + base * (BALL_R + 8.0), "vel": base * 1900.0, "owner": owner, "life": 1.6, "dmg": 12})
-		f["vel"] = (f["vel"] as Vector2) - base * DUEL_RECOIL_PISTOL
-	else:
-		f["cd"] = 0.6
-		for a in [-0.14, 0.0, 0.14]:
-			duel_bullets.append({"pos": f["pos"] + base * (BALL_R + 8.0), "vel": base.rotated(a) * 1700.0, "owner": owner, "life": 1.6, "dmg": 7})
-		f["vel"] = (f["vel"] as Vector2) - base * DUEL_RECOIL_SPREAD
-	_sfx("shoot_low", 0.0, -8.0)
+	f["cd"] = float(DUEL_GUN_CD[gun])
+	var n := int(DUEL_GUN_PELLETS[gun])
+	for i in n:
+		var ang := 0.0
+		if n > 1:
+			ang = lerpf(-float(DUEL_GUN_SPREAD[gun]), float(DUEL_GUN_SPREAD[gun]), float(i) / float(n - 1))
+		duel_bullets.append({"pos": f["pos"] + base * (BALL_R + 8.0), "vel": base.rotated(ang) * float(DUEL_GUN_SPD[gun]), "owner": owner, "life": float(DUEL_GUN_LIFE[gun]), "dmg": int(DUEL_GUN_DMG[gun]), "kind": int(DUEL_GUN_KIND[gun]), "hit": []})
+	f["vel"] = (f["vel"] as Vector2) - base * float(DUEL_GUN_RECOIL[gun])
+	_sfx("shoot_high" if gun >= 3 else "shoot_low", 0.0, -4.0 if gun == 4 else -8.0)
+	if is_same(f, duel_me):
+		var kick := 0.35 if gun == 4 else (0.2 if gun == 3 else 0.12)
+		bloom_level = minf(bloom_level + kick, 2.2)
+		vignette_pulse = minf(vignette_pulse + kick * 0.5, 0.9)
 
 
 ## Claim the gun stick if this is a live versus fighter. Mouse claims pin
@@ -3372,8 +3458,10 @@ func _duel_try_fire(target: Vector2) -> void:
 	if float(duel_me["cd"]) > 0.0:
 		return
 	var mz := (duel_me["pos"] as Vector2) + (target - (duel_me["pos"] as Vector2)).normalized() * (BALL_R + 8.0)
-	_burst(mz, GOLD, 6, 160.0)
-	_ring(mz, GOLD, 6, 200.0)
+	var mgun := int(duel_me.get("gun", 0))
+	var mbig := mgun == 4
+	_burst(mz, GOLD, 12 if mbig else (8 if mgun == 3 else 6), 260.0 if mbig else 160.0)
+	_ring(mz, GOLD, 10 if mbig else 6, 320.0 if mbig else 200.0)
 	if int(duel_me.get("hp", 0)) <= 0 or bool(duel_me.get("gone", false)):
 		return
 	if net_mode == "host":
@@ -3404,19 +3492,31 @@ func _duel_predict_my_bullets() -> void:
 		if int(b.get("owner", -9)) != duel_my_id:
 			continue
 		var bp: Vector2 = b["pos"]
+		var bkind := int(b.get("kind", 0))
 		var hit := false
 		for foe in duel_foes:
 			var ff: Dictionary = foe
 			if int(ff.get("hp", 0)) <= 0:
 				continue
 			if bp.distance_to(ff["pos"]) < BALL_R + DUEL_BULLET_R:
-				hit = true
-				break
+				if bkind == 0:
+					hit = true
+					break
+				# Piercing bolts spark through rivals and keep flying.
+				_burst(bp, WHITE, 2, 90.0)
 		if not hit:
 			for ci in duel_chests.size():
 				var ch: Dictionary = duel_chests[ci]
 				if bp.distance_to(ch["pos"]) < 34.0:
-					if int(ch["hp"]) - int(b["dmg"]) <= 0:
+					if bkind == 2 and int(ch["hp"]) - int(b["dmg"]) <= 0:
+						# Rail slug smashes clean through: real break, ghost flies on.
+						_duel_damage_chest(ci, int(b["dmg"]), duel_me)
+						break
+					elif bkind == 2:
+						_burst(bp, GOLD, 5, 170.0)
+						hit = true
+						break
+					elif int(ch["hp"]) - int(b["dmg"]) <= 0:
 						_duel_damage_chest(ci, int(b["dmg"]), duel_me)
 					else:
 						_burst(bp, GOLD, 5, 170.0)
@@ -3438,7 +3538,7 @@ func _duel_predict_my_pickup() -> void:
 		if (duel_me["pos"] as Vector2).distance_to(pk["pos"]) < 46.0:
 			duel_me["gun"] = maxi(int(duel_me["gun"]), int(pk["kind"]))
 			duel_me["cd"] = 0.0
-			_popup((duel_me["pos"] as Vector2) + Vector2(0.0, -34.0), DUEL_GUN_NAMES[clampi(int(duel_me["gun"]), 0, 2)], CYAN, 16)
+			_popup((duel_me["pos"] as Vector2) + Vector2(0.0, -34.0), DUEL_GUN_NAMES[clampi(int(duel_me["gun"]), 0, 4)], CYAN, 16)
 			_sfx("wave", 0.0, -10.0)
 			duel_pickups.remove_at(pi)
 
@@ -3655,7 +3755,8 @@ func _boss_defeated() -> void:
 	_ring(at, RED, 18, 340.0)
 	shake = maxf(shake, 14.0)
 	hitstop = 0.12
-	bloom_level = minf(bloom_level + 0.6, 1.8)
+	bloom_level = minf(bloom_level + 0.9, 2.2)
+	vignette_pulse = minf(vignette_pulse + 0.40, 0.9)
 	_sfx("kill", 0.1, -2.0)
 
 
@@ -3866,10 +3967,16 @@ func _try_shield() -> bool:
 	return true
 
 
+## Any wall or bumper ricochet reloads the launch, so the ball can bounce
+## again as soon as it touches something. Solo only: versus reloads on
+## the fighter dict, which this never touches.
 func _on_bounce(at: Vector2, strength: float) -> void:
+	if net_mode == "off" and mode == "play":
+		shot_ready = true
 	var s := clampf(strength / 1400.0, 0.0, 1.0)
 	ball_flash = maxf(ball_flash, 0.4 + s)
-	bloom_level = minf(bloom_level + s * 0.22, 1.8)
+	bloom_level = minf(bloom_level + s * 0.4, 2.2)
+	vignette_pulse = minf(vignette_pulse + s * 0.25, 0.9)
 	_burst(at, CYAN, 2 + int(s * 6.0), 60.0 + s * 240.0)
 	if s > 0.18:
 		_shards(at, ball_vel, CYAN, 3 + int(s * 5.0), 150.0 + s * 380.0, 0.5)
@@ -4228,11 +4335,35 @@ func _hex_points(c: Vector2, r: float, rot: float) -> PackedVector2Array:
 	return pts
 
 
+## The lamp everything is lit by: your ball, or the camera while spectating.
+func _light_pos() -> Vector2:
+	if _duel_watching():
+		return cam
+	return ball_pos
+
+
+## Cartoon stand-in for real 2D lights: a blob shadow on the side away
+## from your ball plus a warm kiss of light on the facing side. Strength
+## falls off with distance; past LIGHT_RADIUS the lamp doesn't reach.
+func _cast_shadow(pos: Vector2, r: float, fade: float = 1.0) -> void:
+	var d := pos - _light_pos()
+	var dist := d.length()
+	if dist < 1.0 or dist > LIGHT_RADIUS:
+		return
+	var dir := d / dist
+	var strength := (1.0 - dist / LIGHT_RADIUS) * fade
+	if strength <= 0.02:
+		return
+	draw_circle(pos + dir * (r * 0.55 + 5.0), r * 0.92, Color(0.0, 0.0, 0.0, 0.38 * strength))
+	draw_circle(pos - dir * r * 0.55, r * 0.34, Color(1.0, 0.95, 0.85, 0.20 * strength))
+
+
 func _draw_bumpers() -> void:
 	var vis := _view_rect().grow(CULL_MARGIN)
 	for b in bumpers:
 		if not vis.has_point(b.pos):
 			continue
+		_cast_shadow(b.pos, b.radius)
 		var f: float = clampf(b.flash, 0.0, 1.0)
 		var r: float = b.radius
 		var spin: float = b.phase + t * 0.4
@@ -4262,6 +4393,7 @@ func _draw_targets() -> void:
 		var base: Color = tg.color
 		var f: float = clampf(tg.flash, 0.0, 1.0)
 
+		_cast_shadow(tg.pos, r, fade)
 		draw_circle(tg.pos, r + 14.0, Color(base.r, base.g, base.b, (0.045 + f * 0.10) * fade))
 		# glossy sphere body
 		draw_circle(tg.pos, r, Color(base.r * 0.35, base.g * 0.35, base.b * 0.35, 0.98 * fade))
@@ -4337,6 +4469,7 @@ func _draw_boss() -> void:
 		return
 	var f: float = clampf(boss.flash, 0.0, 1.0)
 	var r := boss.radius
+	_cast_shadow(boss.pos, r)
 	# Scorched bulk with a molten rim, ringed by long spikes.
 	draw_circle(boss.pos, r + 16.0 + f * 10.0, Color(1.0, 0.30, 0.12, 0.06 + f * 0.10))
 	draw_circle(boss.pos, r, Color(0.30, 0.07, 0.10, 0.98))
@@ -4500,6 +4633,11 @@ func _draw_ball() -> void:
 		var u := float(i + 1) / float(n)
 		draw_circle(trail[i], BALL_R * (0.2 + u * 0.8), Color(bc.r, bc.g, bc.b, u * u * 0.16))
 
+	# Your lamp: a soft halo in your skin color that breathes, and flares
+	# while charging so rivals can see the shot winding up.
+	var glow := BALL_R * (5.2 + sin(t * 2.2) * 0.3 + (1.6 if charging else 0.0))
+	draw_circle(ball_pos, glow, Color(bc.r, bc.g, bc.b, 0.045))
+	draw_circle(ball_pos, glow * 0.62, Color(bc.r, bc.g, bc.b, 0.07))
 	draw_circle(ball_pos, BALL_R + 18.0 + ball_flash * 8.0, Color(bc.r, bc.g, bc.b, 0.05 + ball_flash * 0.04))
 	draw_circle(ball_pos, BALL_R + 7.0, Color(minf(bc.r + 0.1, 1.0), minf(bc.g + 0.1, 1.0), minf(bc.b + 0.1, 1.0), 0.12))
 	var face := _ball_face_tex()
@@ -4514,6 +4652,9 @@ func _draw_ball() -> void:
 
 	if mode == "play" and shot_ready:
 		draw_arc(ball_pos, BALL_R + 12.0, 0.0, TAU, 40, Color(_ball_col().r, _ball_col().g, _ball_col().b, 0.32), 2.0, true)
+	# Versus: my equipped gun rides above the ball as a floating badge.
+	if net_mode != "off" and mode == "play" and int(duel_me.get("gun", 0)) > 0:
+		_draw_gun_icon(int(duel_me.get("gun", 0)), ball_pos + Vector2(0.0, -BALL_R - 22.0), 22.0)
 
 	if charging:
 		var c := clampf(charge_t / CHARGE_TIME, 0.0, 1.0)
@@ -4681,7 +4822,9 @@ func _draw_duel_corners() -> void:
 	var my_hp := int(w.get("hp", 0)) if watching else int(duel_me.get("hp", DUEL_HP))
 	var my_gun := 0 if watching else int(duel_me.get("gun", 0))
 	_text(str(my_hp), Vector2(48.0, 56.0), 26, WHITE, true)
-	_text(DUEL_GUN_NAMES[clampi(my_gun, 0, 2)], Vector2(48.0, 82.0), 12, CYAN if my_gun > 0 else RED)
+	_text(DUEL_GUN_NAMES[clampi(my_gun, 0, 4)], Vector2(48.0, 82.0), 12, CYAN if my_gun > 0 else RED)
+	if my_gun > 0:
+		_draw_gun_icon(my_gun, Vector2(150.0, 76.0), 20.0)
 	var bw2 := 150.0
 	draw_rect(Rect2(48.0, 90.0, bw2, 6.0), Color(0.35, 0.55, 1.0, 0.18))
 	draw_rect(Rect2(48.0, 90.0, bw2 * clampf(float(my_hp) / DUEL_HP, 0.0, 1.0), 6.0), CYAN if my_hp > 30 else RED)
@@ -4706,18 +4849,32 @@ func _draw_duel_world() -> void:
 		draw_rect(r, GOLD, false, 2.0)
 		draw_line(r.position, r.end, Color(0.25, 0.16, 0.06, 0.9), 3.0)
 		draw_line(Vector2(r.end.x, r.position.y), Vector2(r.position.x, r.end.y), Color(0.25, 0.16, 0.06, 0.9), 3.0)
+		# Gun sealed inside, so rivals can see what the crate holds.
+		_draw_gun_icon(int(ch.get("gun", 1)), p, 26.0)
 		var frac := clampf(float(ch["hp"]) / DUEL_CHEST_HP, 0.0, 1.0)
 		draw_rect(Rect2(p - Vector2(26.0, 34.0), Vector2(52.0 * frac, 5.0)), GOLD)
 	for pk in duel_pickups:
 		var pp: Vector2 = pk["pos"] + Vector2(0.0, sin(t * 3.0) * 4.0)
-		var gc: Color = CYAN if int(pk["kind"]) == 1 else GOLD
-		draw_circle(pp, 14.0, Color(gc.r, gc.g, gc.b, 0.18))
-		draw_rect(Rect2(pp + Vector2(-10.0, -4.0), Vector2(18.0, 8.0)), gc)
-		draw_rect(Rect2(pp + Vector2(8.0, -2.0), Vector2(12.0, 4.0)), gc)
+		var gk := clampi(int(pk.get("kind", 1)), 1, 4)
+		var gc: Color = DUEL_GUN_COLS[gk]
+		draw_circle(pp, 16.0, Color(gc.r, gc.g, gc.b, 0.18))
+		draw_arc(pp, 16.0, 0.0, TAU, 24, Color(gc.r, gc.g, gc.b, 0.8), 1.5, true)
+		_draw_gun_icon(gk, pp, 22.0)
 	for b in duel_bullets:
 		var bc: Color = CYAN if int(b["owner"]) == _duel_role() else Color(1.0, 0.55, 0.30)
-		draw_circle(b["pos"], DUEL_BULLET_R + 6.0, Color(bc.r, bc.g, bc.b, 0.25))
-		draw_circle(b["pos"], DUEL_BULLET_R, bc)
+		var bk := int(b.get("kind", 0))
+		var bp2: Vector2 = b["pos"]
+		if bk == 1:
+			var bd: Vector2 = (b["vel"] as Vector2).normalized()
+			draw_line(bp2 - bd * 26.0, bp2 + bd * 12.0, Color(bc.r, bc.g, bc.b, 0.5), 10.0, true)
+			draw_line(bp2 - bd * 26.0, bp2 + bd * 12.0, Color(1.0, 1.0, 1.0, 0.9), 4.0, true)
+		elif bk == 2:
+			draw_circle(bp2, DUEL_BULLET_R + 10.0, Color(bc.r, bc.g, bc.b, 0.30))
+			draw_circle(bp2, DUEL_BULLET_R + 4.0, Color(1.0, 1.0, 1.0, 0.95))
+			draw_circle(bp2, DUEL_BULLET_R, bc)
+		else:
+			draw_circle(bp2, DUEL_BULLET_R + 6.0, Color(bc.r, bc.g, bc.b, 0.25))
+			draw_circle(bp2, DUEL_BULLET_R, bc)
 	# Rival fighters in their own colors, skipped once eliminated.
 	for o in duel_foes.size():
 		var f: Dictionary = duel_foes[o]
@@ -4726,6 +4883,7 @@ func _draw_duel_world() -> void:
 		var fp: Vector2 = f.get("pos", Vector2.ZERO)
 		var col: Color = _duel_foe_col(o)
 		if mode == "play" or duel_over:
+			_cast_shadow(fp, BALL_R)
 			draw_circle(fp, BALL_R + 5.0, Color(col.r, col.g, col.b, 0.22))
 			draw_circle(fp, BALL_R, col)
 			draw_circle(fp, BALL_R * 0.45, WHITE)
@@ -4735,6 +4893,8 @@ func _draw_duel_world() -> void:
 			draw_rect(Rect2(fp + Vector2(-29.0, -33.0), Vector2(58.0 * fhp, 4.0)), col)
 			_text_center_at(fp + Vector2(0.0, -40.0), _duel_foe_name(o), 11,
 				Color(minf(col.r + 0.2, 1.0), minf(col.g + 0.1, 1.0), col.b, 0.9))
+			if int(f.get("gun", 0)) > 0:
+				_draw_gun_icon(int(f.get("gun", 0)), fp + Vector2(0.0, -58.0), 20.0)
 
 
 ## Edge arrows pointing at living rivals who are off-screen. Screen space:
@@ -4989,6 +5149,26 @@ func _draw_net() -> void:
 			_text_center_at(Vector2(640.0, 312.0), join_ip + caret, 24, WHITE, bold_font)
 		_net_button(BTN_NET_JOIN, "JOIN" if net_transport == "enet" and not OS.has_feature("web") else "JOIN WEB", mp)
 		_draw_name_box()
+		# Ball picker: same skins as CUSTOMIZE, saved the same way.
+		var br := BTN_NET_BALL
+		br.position.x += (1.0 - _ui_ease_at(0.25)) * 50.0
+		var bhov := br.has_point(mp)
+		draw_rect(br, Color(0.10, 0.22, 0.38, 0.60) if bhov else Color(0.06, 0.13, 0.24, 0.60))
+		if bhov:
+			draw_rect(Rect2(br.position, Vector2(6.0, br.size.y)), WHITE)
+		draw_rect(br, Color(0.42, 0.66, 1.0, 0.35) if bhov else Color(0.42, 0.66, 1.0, 0.18), false, 1.0)
+		_text("BALL", Vector2(br.position.x + 16.0, br.position.y + 23.0), 16, WHITE if bhov else DIM)
+		var bskin: Color = _ball_col()
+		var bface := _ball_face_tex()
+		var bcy := br.position.y + 17.0
+		if bface != null:
+			draw_circle(Vector2(640.0, bcy), 11.0, Color(0.0, 0.0, 0.0, 0.55))
+			draw_texture_rect(bface, Rect2(Vector2(629.0, bcy - 11.0), Vector2(22.0, 22.0)), false)
+			draw_arc(Vector2(640.0, bcy), 11.0, 0.0, TAU, 24, Color(1.0, 1.0, 1.0, 0.85), 1.5, true)
+		else:
+			draw_circle(Vector2(640.0, bcy), 11.0, bskin)
+			draw_circle(Vector2(640.0, bcy), 5.0, WHITE)
+		_text_right("<  " + _ball_skin_name() + "  >", Vector2(br.end.x - 16.0, bcy + 6.0), 16, bskin)
 		if OS.has_feature("web"):
 			_text_center_at(Vector2(640.0, 486.0), "websocket link - paste the ws:// address", 13, DIM)
 		else:
@@ -5070,9 +5250,9 @@ func _draw_title() -> void:
 	var le := _ui_ease_at(0.0)
 	var ly := (1.0 - le) * -26.0 + sin(t * 1.6) * 3.0
 	var bw := bold_font.get_string_size("BOUNCE  ", HORIZONTAL_ALIGNMENT_LEFT, -1, 68).x
-	_text("BOUNCE  BACK", Vector2(114.0, 294.0 + ly), 68, Color(0.25, 0.80, 1.0, 0.30 * le), true)
-	_text("BOUNCE  ", Vector2(110.0, 290.0 + ly), 68, Color(1.0, 1.0, 1.0, le), true)
-	_text("BACK", Vector2(110.0 + bw, 290.0 + ly), 68, Color(1.0, 0.77, 0.30, le), true)
+	_text("BOUNCE  BACK", Vector2(114.0, 160.0 + ly), 68, Color(0.25, 0.80, 1.0, 0.30 * le), true)
+	_text("BOUNCE  ", Vector2(110.0, 156.0 + ly), 68, Color(1.0, 1.0, 1.0, le), true)
+	_text("BACK", Vector2(110.0 + bw, 156.0 + ly), 68, Color(1.0, 0.77, 0.30, le), true)
 	var hov := TITLE_PLAY.has_point(mp) or TITLE_MULTI.has_point(mp) or TITLE_CUSTOM.has_point(mp) or TITLE_SETTINGS.has_point(mp) or TITLE_QUIT.has_point(mp)
 	_title_button(TITLE_PLAY, "PLAY", mp, not hov)
 	_title_button(TITLE_MULTI, "MULTIPLAYER", mp, false)
@@ -5083,8 +5263,6 @@ func _draw_title() -> void:
 	if not hov:
 		var pulse := 0.5 + 0.5 * sin(t * 3.0)
 		draw_rect(TITLE_PLAY.grow(2.0 + pulse * 2.0), Color(0.25, 0.80, 1.0, 0.18 + 0.22 * pulse), false, 2.0)
-	_text("You are Player One", Vector2(110.0, 634.0), 14, DIM)
-	_text("Lobby Privacy: Open", Vector2(110.0, 654.0), 14, DIM)
 	_draw_title_bar()
 	_menu_fade()
 
@@ -5093,7 +5271,7 @@ func _draw_title() -> void:
 ## hovered (or the default PLAY slot when nothing is hovered).
 func _title_button(r: Rect2, label: String, mp: Vector2, selected: bool) -> void:
 	# Buttons sweep in from the left in column order on every arrival.
-	var e := _ui_ease_at(clampf((r.position.y - 330.0) / 50.0, 0.0, 4.0) * 0.06)
+	var e := _ui_ease_at(clampf((r.position.y - 196.0) / 50.0, 0.0, 4.0) * 0.06)
 	var rr := Rect2(r.position + Vector2((1.0 - e) * -60.0, 0.0), r.size)
 	var on := selected or r.has_point(mp)
 	draw_rect(rr, Color(0.10, 0.30, 0.38, 0.95) if on else Color(0.05, 0.13, 0.22, 0.78))
@@ -5105,22 +5283,65 @@ func _title_button(r: Rect2, label: String, mp: Vector2, selected: bool) -> void
 
 
 ## The bouncy ball as the center character: current skin (photo faces
-## included), thick cartoon outline, gloss shine, slow orbiting rings.
+## included), thick cartoon outline, gloss shine, slow orbiting rings,
+## squash-and-stretch idle bob and a cursor-tracking assault rifle held
+## proportional to the ball radius.
 func _draw_title_ball() -> void:
 	# The ball drops in from above, then keeps its idle bob.
 	var be := _ui_ease_at(0.0, 0.45)
-	var c := Vector2(830.0, 390.0 + sin(t * 2.0) * 12.0 + (1.0 - be) * 140.0)
+	var bob := sin(t * 2.0) * 12.0
+	var c := Vector2(830.0, 390.0 + bob + (1.0 - be) * 140.0)
 	draw_arc(c, 152.0, t * 0.7, t * 0.7 + PI * 1.2, 32, Color(0.43, 0.90, 1.0, 0.35), 6.0, true)
 	draw_arc(c, 180.0, -t * 0.5, -t * 0.5 + PI * 0.9, 32, Color(1.0, 0.77, 0.30, 0.30), 5.0, true)
-	draw_circle(c, 110.0, Color(0.0, 0.0, 0.0, 0.45))
+	# Squash and stretch, synced to the bob: stretched while travelling,
+	# round at the top and bottom of each stroke.
+	var stretch := cos(t * 2.0) * 0.03
+	draw_set_transform(c, 0.0, Vector2(1.0 + stretch, 1.0 - stretch))
+	draw_circle(Vector2.ZERO, 110.0, Color(0.0, 0.0, 0.0, 0.45))
 	var face := _ball_face_tex()
 	if face != null:
-		draw_texture_rect(face, Rect2(c - Vector2(110.0, 110.0), Vector2(220.0, 220.0)), false)
+		draw_texture_rect(face, Rect2(Vector2(-110.0, -110.0), Vector2(220.0, 220.0)), false)
 	else:
-		draw_circle(c, 110.0, _ball_col())
-	draw_circle(c + Vector2(-38.0, -44.0), 34.0, Color(1.0, 1.0, 1.0, 0.75))
-	draw_circle(c + Vector2(30.0, 44.0), 12.0, Color(1.0, 1.0, 1.0, 0.45))
-	draw_arc(c, 110.0, 0.0, TAU, 64, Color(1.0, 1.0, 1.0, 0.9), 6.0, true)
+		draw_circle(Vector2.ZERO, 110.0, _ball_col())
+	# Gloss shine breathes with the same idle clock.
+	var shine := 0.65 + 0.25 * sin(t * 2.0 + 1.2)
+	draw_circle(Vector2(-38.0, -44.0), 34.0, Color(1.0, 1.0, 1.0, shine))
+	draw_circle(Vector2(30.0, 44.0), 12.0, Color(1.0, 1.0, 1.0, 0.35 + 0.2 * shine))
+	draw_arc(Vector2.ZERO, 110.0, 0.0, TAU, 64, Color(1.0, 1.0, 1.0, 0.9), 6.0, true)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	_draw_title_gun(c)
+
+
+## Menu mascot gun: the assault-rifle sprite, uniformly scaled so its
+## length stays proportional to the title-ball radius, gripped at the
+## ball edge and aimed at the cursor with a small idle sway.
+func _draw_title_gun(c: Vector2) -> void:
+	if duel_gun_texs.size() < 2:
+		return
+	var tex: Texture2D = duel_gun_texs[1]
+	if tex == null:
+		return
+	var ts := tex.get_size()
+	if ts.x <= 0.0 or ts.y <= 0.0:
+		return
+	var mp := get_viewport().get_mouse_position()
+	var d := mp - c
+	if d.length() < 4.0:
+		d = Vector2.RIGHT
+	var ang := d.angle() + sin(t * 2.3) * 0.035
+	var gun_len := 110.0 * 1.55
+	var sc := gun_len / ts.x
+	var grip := c + Vector2.from_angle(ang) * 62.0
+	var flip := cos(ang) < 0.0
+	# The sprite's barrel is baked in 45 deg up-right, so cancel that out
+	# (mirrored when flipped) to make the muzzle sit on the aim line.
+	var fix := PI / 4.0 if not flip else -PI / 4.0
+	draw_set_transform(grip, ang + fix, Vector2(sc, -sc if flip else sc))
+	draw_texture(tex, Vector2(-ts.x * 0.30, -ts.y * 0.5))
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	var tip := grip + Vector2.from_angle(ang) * gun_len * 0.70
+	var glint := 0.35 + 0.25 * sin(t * 5.0)
+	draw_circle(tip, 3.0, Color(1.0, 0.85, 0.4, glint))
 
 
 ## Bottom control bar: quit hint, best score + how-to, mute state.
