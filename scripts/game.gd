@@ -100,6 +100,8 @@ const BTN_NET_JOIN := Rect2(440.0, 348.0, 400.0, 52.0)
 const BTN_NET_ROLE := Rect2(490.0, 510.0, 300.0, 44.0)
 const BTN_NET_ROLE2 := Rect2(490.0, 360.0, 300.0, 44.0)
 const NET_IP_RECT := Rect2(440.0, 280.0, 400.0, 48.0)
+const NET_NAME_RECT := Rect2(440.0, 410.0, 400.0, 40.0)
+const NET_NAME_RECT_SM := Rect2(490.0, 232.0, 300.0, 36.0)
 const GREEN := Color(0.56, 0.97, 0.76)
 const RED := Color(1.0, 0.25, 0.42)
 const DIM := Color(0.62, 0.76, 0.95, 0.62)
@@ -231,6 +233,9 @@ var foe_score := 0
 var foe_kills := 0
 var join_ip := "127.0.0.1"
 var join_focused := false
+var duel_my_name := ""    # my versus display name; blank falls back to YOU/FOE labels
+var name_focused := false  # typing into the name box (multiplayer menu/join screens)
+var duel_peer_names := {}  # host-side: peer id -> cleaned name sent via _net_hello
 var net_ip_rects: Array = []  # clickable host-screen address lines ({rect, text})
 var net_copied_at := -99.0    # t when an address was last copied to the clipboard
 
@@ -239,6 +244,8 @@ const DUEL_TIME := 60.0
 const DUEL_HP := 100
 const DUEL_GUN_NAMES := ["FISTS", "PISTOL", "SPREAD"]
 const DUEL_BULLET_R := 10.0  # versus bullet body radius: chunky, easier to read and land
+const DUEL_RECOIL_PISTOL := 130.0  # backward kick per pistol shot, px/s
+const DUEL_RECOIL_SPREAD := 170.0  # backward kick per spread pull, px/s
 const DUEL_SNAP_T := 1.0 / 20.0
 const DUEL_CHEST_HP := 25
 const DUEL_CHEST_RESPAWN_T := 5.0   # host drops a fresh crate this often
@@ -247,8 +254,11 @@ const DUEL_SPIKE_REQ := 700.0    # fighter speed needed to smash a spiky ball
 const DUEL_SPIKE_DMG := 10       # damage for a slow touch on spikes
 const DUEL_LAVA_DMG := 15        # burn tick for resting on the molten floor
 const DUEL_LAVA_GRACE := 1.0      # seconds between lava burn ticks
-const DUEL_MAX_PLAYERS := 4      # host + up to 3 joiners in one shared arena
+const DUEL_SERVER_PEERS := 64    # ENet connection slots; no game-level cap on fighters
 const DUEL_FOE_COLS := [Color(1.0, 0.55, 0.25), Color(0.75, 0.55, 1.0), Color(0.45, 1.0, 0.55)]
+const ROULETTE_T := 4.5          # fall-guys map spin length, seconds
+const ROULETTE_CARDS := 24       # cards in the deterministic strip
+const ROULETTE_PITCH := 324.0    # card width + gap on the strip
 var duel_me := {}
 var duel_foe := {}              # first rival; alias of duel_foes[0] when present
 var duel_foes: Array = []       # every rival fighter dict, roster order excluding me
@@ -267,6 +277,15 @@ var duel_snap_t := 0.0
 var duel_snap_balls := true  # balls ride every 2nd snapshot: full 20 Hz sim, 10 Hz ball list
 var duel_snap_seq := 0   # host stamps every snapshot; the client drops stale ones
 var duel_last_seq := -1  # newest snapshot seq applied (client); stale = out of order
+var duel_map := 0                # selected map index; walls bake from it
+var duel_walls: Array = []       # absolute polys (Array of Array of Vector2)
+var duel_maps_cache: Array = []  # lazy-built map defs (name + polys + bounds)
+var roulette_t := 0.0            # spin time left; 0 when settled
+var roulette_win := 0            # map the strip lands on
+var roulette_seed := 0           # shared strip shuffle; host picks, rpc delivers
+var roulette_strip: Array = []   # map indices scrolling past, winner last
+var roulette_tick := -1          # centered card, for the tick sound
+var duel_balls_synced := false  # client applied one ball snapshot; first adopts silently
 var duel_launch_echo := 0  # leftover launch re-sends; one lost packet can't strand us
 var duel_launch_vel := Vector2.ZERO  # velocity the echo re-sends
 var duel_echo_t := 0.0  # spacing between echo re-sends
@@ -608,7 +627,7 @@ func _net_is_private(s: String) -> bool:
 func _net_host() -> void:
 	_net_leave_quiet()
 	var peer := ENetMultiplayerPeer.new()
-	if peer.create_server(NET_PORT, DUEL_MAX_PLAYERS) != OK:
+	if peer.create_server(NET_PORT, DUEL_SERVER_PEERS) != OK:
 		net_status = "HOST FAILED"
 		return
 	multiplayer.multiplayer_peer = peer
@@ -623,6 +642,8 @@ func _net_join(ip: String) -> void:
 	if join_ip == "":
 		net_status = "ENTER AN IP FIRST"
 		return
+	# Committed: the field is gone, so its focus (and key repeat) ends here.
+	join_focused = false
 	# Optional :port suffix (one colon only, so IPv6 stays the host).
 	var host := join_ip
 	var port := NET_PORT
@@ -651,8 +672,11 @@ func _net_leave_quiet() -> void:
 		multiplayer.multiplayer_peer = null
 	net_mode = "off"
 	net_screen = "menu"
+	duel_walls = []
 	net_status = ""
 	join_focused = false
+	name_focused = false
+	duel_peer_names.clear()
 	foe_score = 0
 	foe_kills = 0
 	net_count = 0.0
@@ -665,7 +689,7 @@ func _net_leave() -> void:
 
 
 @rpc("authority", "call_remote", "reliable")
-func _net_begin(roster: Array = []) -> void:
+func _net_begin(roster: Array = [], names: Array = [], map_idx: int = -1) -> void:
 	net_count = 3.0
 	net_last_snap = t
 	_net_toughen()
@@ -674,12 +698,116 @@ func _net_begin(roster: Array = []) -> void:
 	net_send_t = 0.0
 	mode = "net"
 	net_screen = "countdown"
-	_duel_reset(roster)
+	_duel_reset(roster, names, map_idx)
 	_banner("3")
 
 
+## Host START: spin the Fall-Guys-style map roulette instead of jumping
+## straight in. Winner + seed fully determine the strip, so every peer
+## animates the identical show from one reliable rpc.
+func _net_roulette_start() -> void:
+	if net_mode != "host":
+		return
+	roulette_win = randi() % _duel_map_count()
+	roulette_seed = randi()
+	_roulette_setup(roulette_win, roulette_seed)
+	net_screen = "roulette"
+	_net_roulette.rpc(roulette_win, roulette_seed)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _net_roulette(win: int, seed: int) -> void:
+	if net_mode != "client":
+		return
+	_roulette_setup(win, seed)
+	net_screen = "roulette"
+
+
+func _roulette_setup(win: int, seed: int) -> void:
+	var n := _duel_map_count()
+	roulette_win = clampi(win, 0, n - 1)
+	roulette_seed = seed
+	roulette_t = ROULETTE_T
+	roulette_tick = -1
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed
+	roulette_strip.clear()
+	roulette_strip.append(rng.randi() % n)
+	for i in ROULETTE_CARDS - 2:
+		roulette_strip.append(rng.randi() % n)
+	roulette_strip.append(roulette_win)
+
+
+## Strip offset for the current spin time: fast scroll easing out so the
+## winner lands centered. Deterministic on every peer.
+func _roulette_offset() -> float:
+	var pr := clampf(1.0 - roulette_t / ROULETTE_T, 0.0, 1.0)
+	var e := 1.0 - pow(1.0 - pr, 3.0)
+	return -float(maxi(roulette_strip.size() - 1, 0)) * ROULETTE_PITCH * e
+
+
+func _roulette_center() -> int:
+	if roulette_strip.is_empty():
+		return 0
+	return clampi(int(round(-_roulette_offset() / ROULETTE_PITCH)), 0, roulette_strip.size() - 1)
+
+
+## One roulette card: map name over a scaled outline preview.
+func _roulette_card(r: Rect2, mi: int, hot: bool) -> void:
+	draw_rect(r, Color(0.03, 0.07, 0.14, 0.95))
+	draw_rect(r, CYAN if hot else Color(0.42, 0.66, 1.0, 0.45), false, 3.0 if hot else 1.5)
+	var maps := _duel_maps()
+	var m: Dictionary = maps[clampi(mi, 0, maps.size() - 1)]
+	_text_center_at(Vector2(r.get_center().x, r.position.y + 34.0), str(m.get("name", "?")), 20, WHITE if hot else DIM, bold_font)
+	var ext: Vector2 = m.get("ext", Vector2(1.0, 1.0))
+	var ctr: Vector2 = m.get("ctr", Vector2.ZERO)
+	var sc := minf(250.0 / ext.x, 150.0 / ext.y)
+	var org := Vector2(r.get_center().x, r.position.y + 200.0)
+	for poly in m.get("polys", []):
+		var pts := PackedVector2Array()
+		for q in (poly as Array):
+			pts.append(org + ((q as Vector2) - ctr) * sc)
+		if pts.size() < 3:
+			continue
+		draw_colored_polygon(pts, Color(0.10, 0.22, 0.34, 0.9))
+		pts.append(pts[0])
+		draw_polyline(pts, Color(0.45, 0.85, 1.0, 0.9), 2.0, true)
+
+
+## Arcade-cabinet names: short, uppercase, letters/digits/space/_/- only.
+func _net_clean_name(s: String) -> String:
+	var keep := ""
+	var up := s.strip_edges().to_upper()
+	for i in up.length():
+		var c := up.substr(i, 1)
+		if (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == " " or c == "_" or c == "-":
+			keep += c
+	return keep.strip_edges().left(12)
+
+
+## Display names parallel to a roster: mine from the name box, rivals from
+## their hellos. Blanks stay blank; draw code falls back to YOU/FOE labels.
+func _duel_match_names(ids: Array) -> Array:
+	var out: Array = []
+	for id in ids:
+		if int(id) == multiplayer.get_unique_id():
+			out.append(_net_clean_name(duel_my_name))
+		else:
+			out.append(_net_clean_name(str(duel_peer_names.get(int(id), ""))))
+	return out
+
+
+## Client -> host: my display name, sent once on connect. The host files it
+## by peer id and bakes it into the roster names at match start.
+@rpc("any_peer", "call_remote", "reliable")
+func _net_hello(nm: String) -> void:
+	if net_mode != "host":
+		return
+	duel_peer_names[multiplayer.get_remote_sender_id()] = _net_clean_name(nm)
+
+
 ## Ordered peer-id roster for the match: host first, then clients ascending.
-## Capped at DUEL_MAX_PLAYERS; extra joiners are ignored at start.
+## Every connected peer fights: host first, then clients ascending. No cap.
 func _duel_roster() -> Array:
 	# A spectating host stays out of the fighter order; the arena is peers only.
 	var ids: Array = []
@@ -688,7 +816,7 @@ func _duel_roster() -> Array:
 	var peers := multiplayer.get_peers()
 	peers.sort()
 	ids.append_array(peers)
-	return ids.slice(0, DUEL_MAX_PLAYERS)
+	return ids
 
 
 ## Every fighter dict in roster order; duel_me is duel_all()[duel_my_id].
@@ -732,24 +860,31 @@ func _duel_foe_at(idx: int) -> Dictionary:
 
 
 func _duel_fighter(pos: Vector2) -> Dictionary:
-	return {"pos": pos, "vel": Vector2.ZERO, "hp": DUEL_HP, "gun": 0, "cd": 0.0, "slam": 0.0, "ready": true, "gone": false, "spike": 0.0, "lava": 0.0}
+	return {"pos": pos, "vel": Vector2.ZERO, "hp": DUEL_HP, "gun": 0, "cd": 0.0, "slam": 0.0, "ready": true, "gone": false, "spike": 0.0, "lava": 0.0, "name": ""}
 
 
 ## Roster order decides everything: index 0 is the host, the rest are client
 ## peer ids ascending. Spawn spots ring the center so 2-4 fighters never
 ## overlap. duel_me aliases my dict; duel_foes holds every rival in order.
-func _duel_reset(roster: Array = []) -> void:
+func _duel_reset(roster: Array = [], names: Array = [], map_idx: int = -1) -> void:
 	if roster.is_empty():
 		roster = _duel_roster()
+	if names.size() < roster.size():
+		names = _duel_match_names(roster)
 	duel_ids = roster
 	# find() misses when the host sits out: my_id -1 means spectator, no fighter.
+	if map_idx < 0:
+		map_idx = randi() % _duel_map_count()
+	_duel_build_map(map_idx)
 	duel_my_id = duel_ids.find(multiplayer.get_unique_id())
 	var n := duel_ids.size()
 	var c := WORLD.get_center()
 	var all: Array = []
 	for i in n:
 		var ang := TAU * float(i) / float(maxi(n, 1)) - PI * 0.5
-		all.append(_duel_fighter(c + Vector2(cos(ang), sin(ang)) * 650.0))
+		var nf := _duel_fighter(_duel_clear_spot(c + Vector2(cos(ang), sin(ang)) * 650.0, BALL_R + 12.0))
+		nf["name"] = str(names[i]) if i < names.size() else ""
+		all.append(nf)
 	if duel_my_id >= 0:
 		duel_me = all[duel_my_id]
 	else:
@@ -772,12 +907,13 @@ func _duel_reset(roster: Array = []) -> void:
 	stick_id = -1
 	var offs := [Vector2(-260.0, -160.0), Vector2(260.0, -160.0), Vector2(-260.0, 160.0), Vector2(260.0, 160.0), Vector2(0.0, -340.0), Vector2(0.0, 340.0)]
 	for k in (4 if n <= 2 else 6):
-		duel_chests.append({"pos": c + offs[k], "hp": DUEL_CHEST_HP})
+		duel_chests.append({"pos": _duel_clear_spot(c + offs[k], 70.0), "hp": DUEL_CHEST_HP})
 	duel_chest_max = (4 if n <= 2 else 6) + 2
 	duel_chest_t = DUEL_CHEST_RESPAWN_T
 	duel_snap_t = 0.0
 	duel_snap_seq = 0
 	duel_last_seq = -1
+	duel_balls_synced = false
 	duel_launch_echo = 0
 	duel_over = false
 	duel_winner = -1
@@ -817,9 +953,7 @@ func _net_score(s: int, k: int) -> void:
 @rpc("any_peer", "call_remote", "reliable")
 func _net_restart_request() -> void:
 	if net_mode == "host" and mode == "over":
-		var ids := _duel_roster()
-		_net_begin(ids)
-		_net_begin.rpc(ids)
+		_net_roulette_start()
 
 
 ## Client -> host: my launch impulse. Host owns every client fighter and
@@ -859,8 +993,10 @@ func _duel_fire(target: Vector2) -> void:
 
 ## Host -> client: full duel snapshot, 20 Hz, unreliable. Fighters ride in
 ## roster order as [pos, vel, hp, gun, ready] each; bullets/chests/pickups
-## ride packed flat (numbers only, no key strings); the trailing seq stamps
-## the order. I reconcile my slot and glide every rival toward its sample.
+## ride packed flat (numbers only, no key strings); balls ride every 2nd
+## snap with drifter velocities; the trailing seq stamps the order.
+## I reconcile my slot, glide every rival toward its sample, and glide
+## drifters myself between snaps.
 @rpc("authority", "call_remote", "unreliable")
 func _net_duel(state: Array) -> void:
 	if net_mode != "client" or mode != "play":
@@ -934,6 +1070,7 @@ func _net_duel(state: Array) -> void:
 	var old_bl: Array = duel_bullets
 	var smooth: Array = []
 	var used: Array = []
+	var new_shots := false
 	for nb in fresh:
 		var nd: Dictionary = nb
 		var found := -1
@@ -944,12 +1081,38 @@ func _net_duel(state: Array) -> void:
 			if int(ob.get("owner", -9)) == int(nd.get("owner", -9)) and (ob["vel"] as Vector2).distance_squared_to(nd["vel"] as Vector2) < 1.0:
 				found = oi
 				break
+		if found < 0:
+			# Same-frame aim from a slightly desynced fighter: velocity can
+			# miss by a hair while the bullet is clearly ours. Fall back to
+			# the nearest same-owner ghost inside 120 px so predicted shots
+			# never double up.
+			var near := -1
+			var near_d2 := 14400.0
+			for oi2 in old_bl.size():
+				if used.has(oi2):
+					continue
+				var ob4: Dictionary = old_bl[oi2]
+				if int(ob4.get("owner", -9)) != int(nd.get("owner", -9)):
+					continue
+				var dd3: float = (ob4["pos"] as Vector2).distance_squared_to(nd["pos"] as Vector2)
+				if dd3 < near_d2:
+					near_d2 = dd3
+					near = oi2
+			found = near
 		if found >= 0:
 			used.append(found)
 			var ob2: Dictionary = old_bl[found]
 			smooth.append({"pos": (ob2["pos"] as Vector2).lerp(nd["pos"], 0.5), "vel": nd["vel"], "owner": nd["owner"], "life": nd["life"], "dmg": nd["dmg"]})
 		else:
+			# Someone else just pulled the trigger: flash its muzzle the way
+			# the shooter's screen does. Our own predicted shots always
+			# match above, so they never double-flash here.
+			var np: Vector2 = nd["pos"]
+			_burst(np, GOLD, 4, 140.0)
+			new_shots = true
 			smooth.append(nd)
+	if new_shots:
+		_sfx("shoot_low", 0.0, -10.0)
 	# A bullet the host dropped mid-flight with life left hit something.
 	# Its burst only shows on the host screen, so replay it here instead.
 	for oi in old_bl.size():
@@ -1006,54 +1169,95 @@ func _net_duel(state: Array) -> void:
 	var flat: Array = state[5]
 	if flat.is_empty():
 		return
-	var old_targets := targets.duplicate()
-	targets.clear()
+	# Drifters glide client-side now: the host ships their velocities and
+	# each snapshot only reconciles - the same ball keeps moving locally
+	# and the sample just nudges it, like bullets and rival fighters.
+	var slot_vel := {}
+	var dv: Array = state[7] if state.size() > 7 else []
+	for i in range(0, dv.size(), 3):
+		if i + 2 >= dv.size():
+			break
+		slot_vel[int(dv[i])] = Vector2(float(dv[i + 1]), float(dv[i + 2]))
+	# First sync adopts silently: both sides scattered independently,
+	# so nothing was actually smashed.
+	var first_sync := not duel_balls_synced
+	duel_balls_synced = true
+	var kept: Array = []
+	var used_tg := {}
+	var slot := -1
 	for i in range(0, flat.size(), 4):
 		if i + 3 >= flat.size():
 			break
-		var tg := Target.new()
-		tg.pos = Vector2(float(flat[i]), float(flat[i + 1]))
-		tg.radius = float(flat[i + 2])
-		tg.tame = true
-		# Snapshot balls already exist on the host: full fade-in and a free
-		# pulse phase, or every ball would sit near-invisible (age 0).
-		# Spike rotation is never synced: each ball derives a stable phase
-		# from its list index, so no rotation state is tracked or sent.
-		tg.age = 1.0
-		tg.phase = fmod(float(i >> 2) * 2.399963, TAU)
-		var dk := int(flat[i + 3])
-		if dk == 2:
-			tg.kind = "armored"
-			tg.color = GOLD
-			tg.req = DUEL_SPIKE_REQ
-		elif dk == 1:
-			tg.kind = "drifter"
-			tg.color = GREEN
+		slot += 1
+		var ipos := Vector2(float(flat[i]), float(flat[i + 1]))
+		var irad := float(flat[i + 2])
+		var ikind := "armored" if int(flat[i + 3]) == 2 else ("drifter" if int(flat[i + 3]) == 1 else "basic")
+		var best := -1
+		var best_d2 := 1600.0
+		for oi in targets.size():
+			if used_tg.has(oi):
+				continue
+			var ot = targets[oi]
+			if ot.kind != ikind:
+				continue
+			var dd2: float = ot.pos.distance_squared_to(ipos)
+			if dd2 < best_d2:
+				best_d2 = dd2
+				best = oi
+		if best >= 0:
+			used_tg[best] = true
+			var et = targets[best]
+			if et.pos.distance_to(ipos) > 150.0:
+				et.pos = ipos
+			else:
+				et.pos = et.pos.lerp(ipos, 0.5)
+			if slot_vel.has(slot):
+				et.vel = slot_vel[slot]
+			et.radius = irad
+			kept.append(et)
 		else:
-			tg.kind = "basic"
-			tg.color = PINK
-		targets.append(tg)
+			var tg := Target.new()
+			tg.pos = ipos
+			tg.radius = irad
+			tg.tame = true
+			# New balls fade in like solo spawns; spike rotation stays
+			# index-derived so no rotation state is tracked or sent.
+			tg.age = 1.0
+			tg.phase = fmod(float(slot) * 2.399963, TAU)
+			if ikind == "armored":
+				tg.kind = "armored"
+				tg.color = GOLD
+				tg.req = DUEL_SPIKE_REQ
+			elif ikind == "drifter":
+				tg.kind = "drifter"
+				tg.color = GREEN
+				tg.vel = slot_vel.get(slot, Vector2.ZERO)
+			else:
+				tg.kind = "basic"
+				tg.color = PINK
+			kept.append(tg)
 	# A ball the host dropped is a smash: replay it with the same burst +
-	# ring solo gets. An empty old list is just the first sync, not kills.
-	if not old_targets.is_empty():
-		for ot in old_targets:
-			var sp: Vector2 = ot.pos
-			var taken := true
-			for j in range(0, flat.size(), 4):
-				if Vector2(float(flat[j]), float(flat[j + 1])).distance_to(sp) < 30.0:
-					taken = false
-					break
-			if taken:
-				var sc := PINK
-				if ot.kind == "drifter":
-					sc = GREEN
-				elif ot.kind == "armored":
-					sc = GOLD
-				_burst(sp, sc, 12, 280.0)
-				_ring(sp, sc, 8, 220.0)
-				if sp.distance_to(ball_pos) < 700.0:
-					shake = maxf(shake, 4.0)
+	# ring solo gets.
+	if not first_sync:
+		for oi in targets.size():
+			if used_tg.has(oi):
+				continue
+			var ot2 = targets[oi]
+			var sp: Vector2 = ot2.pos
+			var sc := PINK
+			if ot2.kind == "drifter":
+				sc = GREEN
+			elif ot2.kind == "armored":
+				sc = GOLD
+			_burst(sp, sc, 12, 280.0)
+			_ring(sp, sc, 8, 220.0)
+			_shards(sp, Vector2.ZERO, sc, 8, 470.0, 0.5)
+			_popup(sp + Vector2(0.0, -30.0), "SMASH", GREEN, 20)
+			hitstop = maxf(hitstop, 0.04)
+			if sp.distance_to(ball_pos) < 700.0:
+				shake = maxf(shake, 4.0)
 				_sfx("kill", 0.08, -12.0)
+	targets = kept
 
 
 ## Host -> client: the round is decided. Both sides show the verdict.
@@ -1084,6 +1288,7 @@ func _on_net_connected_to_server() -> void:
 		net_status = ""
 		net_timeout = 0.0
 		_net_toughen()
+		_net_hello.rpc_id(1, duel_my_name)
 
 
 ## Give ENet room to ride out WiFi hiccups before calling a peer dead:
@@ -1146,17 +1351,27 @@ func _on_net_peer_disconnected(id: int) -> void:
 
 
 func _net_click(mp: Vector2) -> void:
-	if net_screen == "countdown":
+	if net_screen == "countdown" or net_screen == "roulette":
 		return
 	if BTN_BACK.has_point(mp):
 		_net_leave()
 		return
 	if net_screen == "menu":
-		if BTN_NET_HOST.has_point(mp):
+		if NET_NAME_RECT.has_point(mp):
+			name_focused = true
+		elif BTN_NET_HOST.has_point(mp):
+			name_focused = false
 			_net_host()
 		elif BTN_NET_JOIN.has_point(mp):
+			name_focused = false
+			join_focused = true
 			net_screen = "join"
+		else:
+			name_focused = false
 	elif net_screen == "host" and net_mode == "host":
+		if NET_NAME_RECT_SM.has_point(mp):
+			name_focused = true
+			return
 		for e in net_ip_rects:
 			if (e["rect"] as Rect2).has_point(mp):
 				DisplayServer.clipboard_set(str(e.get("copy", e.get("text", ""))))
@@ -1165,22 +1380,43 @@ func _net_click(mp: Vector2) -> void:
 		if BTN_NET_ROLE.has_point(mp):
 			duel_host_plays = not duel_host_plays
 	elif net_screen == "join":
-		if NET_IP_RECT.has_point(mp):
+		if NET_NAME_RECT.has_point(mp):
+			name_focused = true
+			join_focused = false
+		elif NET_IP_RECT.has_point(mp):
 			join_focused = true
+			name_focused = false
 		else:
 			join_focused = false
+			name_focused = false
 			if BTN_NET_JOIN.has_point(mp):
 				_net_join(join_ip)
 	elif net_screen == "ready" and net_mode == "host":
-		if BTN_NET_ROLE2.has_point(mp):
+		if NET_NAME_RECT_SM.has_point(mp):
+			name_focused = true
+		elif BTN_NET_ROLE2.has_point(mp):
 			duel_host_plays = not duel_host_plays
 		elif BTN_START.has_point(mp):
-			var ids := _duel_roster()
-			_net_begin(ids)
-			_net_begin.rpc(ids)
+			name_focused = false
+			_net_roulette_start()
+	elif net_screen == "ready":
+		if NET_NAME_RECT_SM.has_point(mp):
+			name_focused = true
 
 
 func _net_key(code: int) -> void:
+	if name_focused and (net_screen == "menu" or net_screen == "join" or net_screen == "host" or net_screen == "ready"):
+		if code == KEY_BACKSPACE and duel_my_name.length() > 0:
+			duel_my_name = duel_my_name.substr(0, duel_my_name.length() - 1)
+		elif code == KEY_ENTER or code == KEY_KP_ENTER:
+			name_focused = false
+		elif code == KEY_SPACE and duel_my_name.length() < 12:
+			duel_my_name += " "
+		elif code == KEY_MINUS and duel_my_name.length() < 12:
+			duel_my_name += "-"
+		elif ((code >= KEY_A and code <= KEY_Z) or (code >= KEY_0 and code <= KEY_9)) and duel_my_name.length() < 12:
+			duel_my_name += "%c" % code
+		return
 	if net_screen != "join" or not join_focused:
 		return
 	if code >= KEY_0 and code <= KEY_9 and join_ip.length() < 48:
@@ -1260,6 +1496,9 @@ func _unhandled_input(event: InputEvent) -> void:
 					mode = "net"
 					net_screen = "menu"
 					net_status = ""
+					# Land typing-ready: the name box is the only field here.
+					name_focused = true
+					join_focused = false
 			elif mode == "custom":
 				_custom_click(mb.position)
 			elif mode == "net":
@@ -1270,12 +1509,19 @@ func _unhandled_input(event: InputEvent) -> void:
 		else:
 			_fire()
 		return
-
 	var key := event as InputEventKey
-	if key and not key.echo:
+	# Held keys repeat as echo events: let them through while a text field
+	# owns the focus, so holding a letter or backspace keeps typing.
+	# Shortcuts never repeat: echo only passes while typing.
+	var typing := mode == "net" and (name_focused or join_focused)
+	if key and key.pressed and (not key.echo or typing):
 		if (net_mode != "off" or mode == "net") and key.pressed:
 			if key.keycode == KEY_ESCAPE:
 				get_tree().quit()
+			# A focused text box eats every key first: otherwise shortcuts
+			# like M (mute) would swallow letters out of the name.
+			elif typing:
+				_net_key(key.keycode)
 			elif key.keycode == KEY_M:
 				muted = not muted
 				if muted:
@@ -1286,9 +1532,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				_net_leave()
 			elif (key.keycode == KEY_R or key.keycode == KEY_SPACE) and mode == "over":
 				if net_mode == "host":
-					var ids := _duel_roster()
-					_net_begin(ids)
-					_net_begin.rpc(ids)
+					_net_roulette_start()
 				else:
 					_net_restart_request.rpc_id(1)
 			elif key.keycode == KEY_F and mode == "play":
@@ -1334,6 +1578,7 @@ func _enter_title() -> void:
 	trail.clear()
 	targets.clear()
 	bumpers.clear()
+	duel_walls = []
 	particles.clear()
 	popups.clear()
 	charging = false
@@ -1358,6 +1603,7 @@ func _enter_title() -> void:
 
 func _start_game() -> void:
 	mode = "play"
+	duel_walls = []
 	died_in_lava = false
 	died_on_spikes = false
 	shot_ready = true
@@ -1799,6 +2045,17 @@ func _physics_process(delta: float) -> void:
 						_start_game()
 				elif int(ceil(net_count)) != before:
 					_banner(str(int(ceil(net_count))))
+			if net_screen == "roulette":
+				roulette_t = maxf(0.0, roulette_t - delta)
+				var rc := _roulette_center()
+				if rc != roulette_tick:
+					roulette_tick = rc
+					_sfx("bounce", 0.0, -16.0)
+				if roulette_t <= 0.0 and net_mode == "host" and mode == "net":
+					var ids := _duel_roster()
+					var nm := _duel_match_names(ids)
+					_net_begin(ids, nm, roulette_win)
+					_net_begin.rpc(ids, nm, roulette_win)
 		"play":
 			_update_play(delta)
 
@@ -1927,7 +2184,9 @@ func _update_play(delta: float) -> void:
 # ------------------------------------------------------------------ duel
 ## Shared-arena versus shooter: both fighters in one world, host simulates,
 ## client commands launches/shots and predicts its own fighter. 100 HP each,
-## breaking a chest instantly equips PISTOL then SPREAD; KO (or more HP at 0s) wins.
+## breaking a chest instantly equips PISTOL then SPREAD; last one standing wins.
+## A 0s clock with two or more fighters alive is a draw: nobody wins without
+## every rival dead.
 func _update_duel(delta: float) -> void:
 	# Solo freezes a beat on big hits; the duel shares the same punch.
 	if hitstop > 0.0:
@@ -1986,7 +2245,10 @@ func _update_duel(delta: float) -> void:
 		time_left -= delta
 		if time_left <= 0.0:
 			time_left = 0.0
-			_duel_finish(_duel_time_winner())
+			# No HP verdict: a win needs every rival dead, so the clock
+			# can only end it level. The elimination check below crowns
+			# the last fighter standing.
+			_duel_finish(-1)
 			return
 		var alive: Array = []
 		for i in allf.size():
@@ -2002,17 +2264,27 @@ func _update_duel(delta: float) -> void:
 			for f in allf:
 				var ff3: Dictionary = f
 				fighters.append([ff3["pos"], ff3["vel"], ff3["hp"], ff3["gun"], ff3["ready"]])
-			# Balls dominate the payload and barely move, so they ride every
-			# 2nd snapshot (~10 Hz); fighters, bullets and chests stay 20 Hz.
+			# Balls ride every 2nd snapshot (~10 Hz); fighters, bullets and
+			# chests stay 20 Hz. Drifters ship their velocity too, so joiners
+			# glide them client-side between snaps instead of jump-cutting.
 			# An empty list means "no change", never "arena is empty".
 			duel_snap_balls = not duel_snap_balls
 			var tg_flat: Array = []
+			# [slot, vx, vy] per drifter, slots matching the ball order above.
+			# ~20 movers; basics and spikies never move, so they ride free.
+			var dv_flat: Array = []
 			if duel_snap_balls:
+				var slot := 0
 				for tg in targets:
 					tg_flat.append(tg.pos.x)
 					tg_flat.append(tg.pos.y)
 					tg_flat.append(tg.radius)
 					tg_flat.append(2 if tg.kind == "armored" else (1 if tg.kind == "drifter" else 0))
+					if tg.kind == "drifter":
+						dv_flat.append(slot)
+						dv_flat.append(tg.vel.x)
+						dv_flat.append(tg.vel.y)
+					slot += 1
 			# Dictionaries re-send every key string per entry per snapshot,
 			# so bullets/chests/pickups ride packed flat: numbers only.
 			var bf: Array = []
@@ -2045,7 +2317,7 @@ func _update_duel(delta: float) -> void:
 				# snapshot must never overwrite a newer one on the client.
 			duel_snap_seq += 1
 			net_last_snap = t
-			_net_duel.rpc([fighters, bf, cf, pf, time_left, tg_flat, duel_snap_seq])
+			_net_duel.rpc([fighters, bf, cf, pf, time_left, tg_flat, duel_snap_seq, dv_flat])
 	else:
 		# Staggered launch echo: re-send until the host applies it.
 		if duel_launch_echo > 0:
@@ -2059,6 +2331,9 @@ func _update_duel(delta: float) -> void:
 			# Same contact response the host sim runs, in the same order,
 			# so its snapshots confirm prediction instead of rewinding it.
 			_duel_clash_me()
+			# Drifters glide client-side at full frame rate; snapshots only
+			# reconcile them. Same tame-ball motion the host sim runs.
+			_update_targets(wdt)
 			_duel_smash_check(false)
 		# Predict each rival with its last known velocity, then ease toward
 		# the newest sample. Kills the stop-and-jump of pure snapshot lerping.
@@ -2071,6 +2346,8 @@ func _update_duel(delta: float) -> void:
 			fpos = fpos.lerp(duel_foe_goals[o] as Vector2, minf(1.0, delta * 8.0))
 			rf["pos"] = fpos
 		_duel_update_bullets(wdt, false)
+		_duel_predict_my_bullets()
+		_duel_predict_my_pickup()
 		time_left = maxf(0.0, time_left - delta)
 	ball_pos = duel_me["pos"]
 	ball_vel = duel_me["vel"]
@@ -2144,6 +2421,15 @@ func _duel_step(f: Dictionary, dt: float, authoritative: bool) -> void:
 					_duel_damage_chest(i, 25, f)
 					_sfx("bump", 0.10, -14.0)
 					break
+	# Map walls slide like the world edge: push out, kill inward speed.
+	if not duel_walls.is_empty():
+		var shove := _duel_wall_push(p, BALL_R)
+		if shove.length_squared() > 0.0001:
+			p += shove
+		var wn := shove.normalized()
+		var wvn := v.dot(wn)
+		if wvn < 0.0:
+			v -= wvn * wn
 	f["pos"] = p
 	f["vel"] = v
 
@@ -2242,6 +2528,10 @@ func _duel_update_bullets(dt: float, authoritative: bool) -> void:
 					_sfx("bump", 0.05, -10.0)
 					dead = true
 					break
+		if not dead and not duel_walls.is_empty() and _duel_point_blocked(bp, DUEL_BULLET_R + 6.0):
+			_burst(bp, CYAN, 6, 160.0)
+			_sfx("bump", 0.05, -14.0)
+			dead = true
 		if not dead:
 			b["pos"] = bp
 			b["life"] = life
@@ -2335,6 +2625,151 @@ func _duel_client_hurt_fx(pos: Vector2, old_hp: int, new_hp: int, is_me: bool) -
 			_sfx("armor", 0.0, -10.0)
 
 
+## Versus maps: simple polygonic slabs inside the world barriers. The open
+## field stays empty; the rest are center-anchored boxes plus one octagon,
+## all high above the lava line (spawns still resolve out, just in case).
+func _duel_map_defs() -> Array:
+	var c := WORLD.get_center()
+	var maps: Array = []
+	maps.append({"name": "OPEN FIELD", "polys": []})
+	maps.append({"name": "PILLARS", "polys": [
+		_box_at(c, -480.0, -260.0, 150.0, 150.0),
+		_box_at(c, 480.0, -260.0, 150.0, 150.0),
+		_box_at(c, -480.0, 260.0, 150.0, 150.0),
+		_box_at(c, 480.0, 260.0, 150.0, 150.0)]})
+	maps.append({"name": "CROSSROADS", "polys": [
+		_box_at(c, 0.0, 0.0, 920.0, 140.0),
+		_box_at(c, 0.0, 0.0, 140.0, 920.0)]})
+	maps.append({"name": "TWIN GATES", "polys": [
+		_box_at(c, -350.0, -430.0, 140.0, 560.0),
+		_box_at(c, -350.0, 430.0, 140.0, 560.0),
+		_box_at(c, 350.0, -430.0, 140.0, 560.0),
+		_box_at(c, 350.0, 430.0, 140.0, 560.0)]})
+	var oct: Array = []
+	for i in 8:
+		var a := TAU * float(i) / 8.0 + TAU / 16.0
+		oct.append(c + Vector2(cos(a), sin(a)) * 380.0)
+	maps.append({"name": "STAR FORT", "polys": [oct]})
+	for m in maps:
+		var md: Dictionary = m
+		var lo := Vector2(INF, INF)
+		var hi := Vector2(-INF, -INF)
+		for poly in md.get("polys", []):
+			for q in (poly as Array):
+				var qp: Vector2 = q
+				lo.x = minf(lo.x, qp.x)
+				lo.y = minf(lo.y, qp.y)
+				hi.x = maxf(hi.x, qp.x)
+				hi.y = maxf(hi.y, qp.y)
+		md["ctr"] = (lo + hi) * 0.5
+		md["ext"] = Vector2(maxf(hi.x - lo.x, 1.0), maxf(hi.y - lo.y, 1.0))
+	return maps
+
+
+## Center-anchored box corners for map building.
+func _box_at(c: Vector2, x: float, y: float, w: float, h: float) -> Array:
+	return [c + Vector2(x - w * 0.5, y - h * 0.5), c + Vector2(x + w * 0.5, y - h * 0.5),
+		c + Vector2(x + w * 0.5, y + h * 0.5), c + Vector2(x - w * 0.5, y + h * 0.5)]
+
+
+func _duel_maps() -> Array:
+	if duel_maps_cache.is_empty():
+		duel_maps_cache = _duel_map_defs()
+	return duel_maps_cache
+
+
+func _duel_map_count() -> int:
+	return _duel_maps().size()
+
+
+func _duel_map_name(i: int) -> String:
+	var maps := _duel_maps()
+	return str((maps[clampi(i, 0, maps.size() - 1)] as Dictionary).get("name", "?"))
+
+
+## Absolute wall polys for this match, from the selected map.
+func _duel_build_map(idx: int) -> void:
+	var maps := _duel_maps()
+	duel_map = clampi(idx, 0, maps.size() - 1)
+	duel_walls = ((maps[duel_map] as Dictionary).get("polys", []) as Array).duplicate(true)
+
+
+## Closest point on segment ab to p.
+func _seg_closest(a: Vector2, b: Vector2, p: Vector2) -> Vector2:
+	var ab := b - a
+	if ab.length_squared() < 0.0001:
+		return a
+	return a + ab * clampf((p - a).dot(ab) / ab.length_squared(), 0.0, 1.0)
+
+
+## Ray-cast containment for spawn checks.
+func _point_in_poly(pt: Vector2, pl: Array) -> bool:
+	var inside := false
+	var n := pl.size()
+	for i in n:
+		var a: Vector2 = pl[i]
+		var b: Vector2 = pl[(i + 1) % n]
+		if (a.y > pt.y) != (b.y > pt.y):
+			var x := a.x + (pt.y - a.y) * (b.x - a.x) / (b.y - a.y)
+			if pt.x < x:
+				inside = not inside
+	return inside
+
+
+## True when a disc of radius pad around pt touches any wall.
+func _duel_point_blocked(pt: Vector2, pad: float) -> bool:
+	for poly in duel_walls:
+		var pl: Array = poly
+		if pl.size() < 3:
+			continue
+		if _point_in_poly(pt, pl):
+			return true
+		for i in pl.size():
+			if pt.distance_to(_seg_closest(pl[i], pl[(i + 1) % pl.size()], pt)) < pad:
+				return true
+	return false
+
+
+## Push a disc out of every wall (edges and containment); two passes
+## settle corners. Returns the total push so callers can kill or
+## reflect the inward velocity component.
+func _duel_wall_push(pt: Vector2, r: float) -> Vector2:
+	var pos := pt
+	for pass_i in 2:
+		for poly in duel_walls:
+			var pl: Array = poly
+			if pl.size() < 3:
+				continue
+			var best := pos
+			var best_d2 := INF
+			for i in pl.size():
+				var q := _seg_closest(pl[i], pl[(i + 1) % pl.size()], pos)
+				var d2 := pos.distance_squared_to(q)
+				if d2 < best_d2:
+					best_d2 = d2
+					best = q
+			var d := sqrt(best_d2)
+			var n := (pos - best) / maxf(d, 0.001)
+			if _point_in_poly(pos, pl):
+				pos += n * (d + r)
+			elif d < r:
+				pos += n * (r - d)
+	return pos - pt
+
+
+## Spawn-safe point: shoved clear of walls (fighters, chests).
+func _duel_clear_spot(pt: Vector2, pad: float) -> Vector2:
+	if duel_walls.is_empty():
+		return pt
+	var pos := pt
+	for k in 3:
+		var push := _duel_wall_push(pos, pad)
+		if push.length_squared() < 0.0001:
+			break
+		pos += push
+	return pos
+
+
 ## Duel balls: pink basics, green drifters and gold spikies (no pickups).
 ## Spikies need a fast hit to smash; slow touches burn. Tame: never homing.
 ## Both sides scatter some instantly; the host truth wins via snapshots.
@@ -2387,6 +2822,8 @@ func _duel_free_spot(r: float) -> Vector2:
 				break
 		if crowded:
 			continue
+		if not duel_walls.is_empty() and _duel_point_blocked(pt, 60.0 + r):
+			continue
 		var free := true
 		for ch in duel_chests:
 			if pt.distance_to(ch["pos"]) < 120.0 + r:
@@ -2417,6 +2854,8 @@ func _duel_chest_spot() -> Vector2:
 			if pt.distance_to((f as Dictionary).get("pos", WORLD.get_center())) < 300.0:
 				ok = false
 				break
+		if ok and not duel_walls.is_empty() and _duel_point_blocked(pt, 90.0):
+			ok = false
 		if ok:
 			for ch in duel_chests:
 				if pt.distance_to(ch["pos"]) < 220.0:
@@ -2467,6 +2906,10 @@ func _duel_smash_check(authoritative := true) -> void:
 					_popup(tg.pos + Vector2(0.0, -30.0), "-%d SPIKES" % DUEL_SPIKE_DMG, RED, 20)
 					_shards(tg.pos, v, RED, 8, 470.0, 0.5)
 					_sfx("armor", 0.0, -8.0)
+					if not authoritative:
+						_popup(tg.pos + Vector2(0.0, -30.0), "-%d SPIKES" % DUEL_SPIKE_DMG, RED, 20)
+						_shards(tg.pos, v, RED, 8, 470.0, 0.5)
+						_sfx("armor", 0.0, -8.0)
 				fp = f["pos"]
 				continue
 			if not authoritative:
@@ -2488,23 +2931,6 @@ func _duel_smash_check(authoritative := true) -> void:
 	shot_ready = bool(duel_me.get("ready", true))
 
 
-## Timeout verdict: highest HP takes it; ties share the draw (-1).
-func _duel_time_winner() -> int:
-	var best_i := -1
-	var best_hp := -1
-	var tied := false
-	var allf := _duel_all()
-	for i in mini(duel_ids.size(), allf.size()):
-		var h := int((allf[i] as Dictionary).get("hp", 0))
-		if h > best_hp:
-			best_hp = h
-			best_i = i
-			tied = false
-		elif h == best_hp:
-			tied = true
-	return -1 if tied else best_i
-
-
 ## Reliable round end, called on host only, then broadcast.
 func _duel_finish(winner: int) -> void:
 	if duel_over:
@@ -2521,7 +2947,9 @@ func _duel_finish(winner: int) -> void:
 	_duel_end.rpc(winner)
 
 
-## Pistol and 3-pellet spread. Host spawns; no gun = hint only.
+## Pistol and 3-pellet spread. Host spawns; no gun = hint only. Every
+## pull kicks the shooter backwards off the aim line, so firing has a
+## movement cost and you can't hose the trigger without drifting.
 func _duel_spawn_shots(f: Dictionary, target: Vector2, owner: int = -1) -> void:
 	var gun := int(f["gun"])
 	if gun <= 0 or float(f["cd"]) > 0.0 or duel_over:
@@ -2537,10 +2965,12 @@ func _duel_spawn_shots(f: Dictionary, target: Vector2, owner: int = -1) -> void:
 	if gun == 1:
 		f["cd"] = 0.35
 		duel_bullets.append({"pos": f["pos"] + base * (BALL_R + 8.0), "vel": base * 1900.0, "owner": owner, "life": 1.6, "dmg": 12})
+		f["vel"] = (f["vel"] as Vector2) - base * DUEL_RECOIL_PISTOL
 	else:
 		f["cd"] = 0.6
 		for a in [-0.14, 0.0, 0.14]:
 			duel_bullets.append({"pos": f["pos"] + base * (BALL_R + 8.0), "vel": base.rotated(a) * 1700.0, "owner": owner, "life": 1.6, "dmg": 7})
+		f["vel"] = (f["vel"] as Vector2) - base * DUEL_RECOIL_SPREAD
 	_sfx("shoot_low", 0.0, -8.0)
 
 
@@ -2577,13 +3007,64 @@ func _duel_try_fire(target: Vector2) -> void:
 		_duel_fire.rpc(target)
 
 
-## Client prediction: pay the cooldown now so holding fire feels right.
+## Client prediction: spawn our shots locally the same frame we fire, with
+## the exact params the host sim uses, so the trigger feels instant. The
+## next snapshot matches each ghost by owner + velocity and just eases it,
+## so no duplicates; damage itself stays host-side.
 func _duel_me_predict_shot(target: Vector2) -> void:
-	var gun := int(duel_me["gun"])
-	if gun == 1:
-		duel_me["cd"] = 0.35
-	elif gun == 2:
-		duel_me["cd"] = 0.6
+	_duel_spawn_shots(duel_me, target, duel_my_id)
+
+
+## Client-side: my bullets spark against rivals and chests the same frame
+## instead of sailing through until the snapshot. A hit only spends the
+## local ghost with a small flash; rival damage still arrives via hp diffs,
+## and a lethal chest hit runs the real break so the snapshot confirms it
+## silently instead of replaying the burst a second time.
+func _duel_predict_my_bullets() -> void:
+	if duel_my_id < 0 or duel_over:
+		return
+	for bi in range(duel_bullets.size() - 1, -1, -1):
+		var b: Dictionary = duel_bullets[bi]
+		if int(b.get("owner", -9)) != duel_my_id:
+			continue
+		var bp: Vector2 = b["pos"]
+		var hit := false
+		for foe in duel_foes:
+			var ff: Dictionary = foe
+			if int(ff.get("hp", 0)) <= 0:
+				continue
+			if bp.distance_to(ff["pos"]) < BALL_R + DUEL_BULLET_R:
+				hit = true
+				break
+		if not hit:
+			for ci in duel_chests.size():
+				var ch: Dictionary = duel_chests[ci]
+				if bp.distance_to(ch["pos"]) < 34.0:
+					if int(ch["hp"]) - int(b["dmg"]) <= 0:
+						_duel_damage_chest(ci, int(b["dmg"]), duel_me)
+					else:
+						_burst(bp, GOLD, 5, 170.0)
+					hit = true
+					break
+		if hit:
+			duel_bullets.remove_at(bi)
+			_burst(bp, WHITE, 3, 120.0)
+
+
+## Client-side: walking over a pickup equips it on the spot with the same
+## popup + sound the host grant plays. Snapshots then just confirm the gun
+## already shown, so a contested pickup quietly corrects itself.
+func _duel_predict_my_pickup() -> void:
+	if duel_my_id < 0 or duel_over or int(duel_me.get("hp", 0)) <= 0:
+		return
+	for pi in range(duel_pickups.size() - 1, -1, -1):
+		var pk: Dictionary = duel_pickups[pi]
+		if (duel_me["pos"] as Vector2).distance_to(pk["pos"]) < 46.0:
+			duel_me["gun"] = maxi(int(duel_me["gun"]), int(pk["kind"]))
+			duel_me["cd"] = 0.0
+			_popup((duel_me["pos"] as Vector2) + Vector2(0.0, -34.0), DUEL_GUN_NAMES[clampi(int(duel_me["gun"]), 0, 2)], CYAN, 16)
+			_sfx("wave", 0.0, -10.0)
+			duel_pickups.remove_at(pi)
 
 
 func _update_targets(dt: float) -> void:
@@ -2610,6 +3091,14 @@ func _update_targets(dt: float) -> void:
 
 		tg.pos.x = clampf(tg.pos.x, WORLD.position.x + tg.radius, WORLD.end.x - tg.radius)
 		tg.pos.y = clampf(tg.pos.y, WORLD.position.y + tg.radius, _lava_top() - tg.radius)
+		if not duel_walls.is_empty() and (tg.kind == "drifter" or tg.kind == "star" or tg.kind == "shield"):
+			var bpush := _duel_wall_push(tg.pos, tg.radius)
+			if bpush.length_squared() > 0.0001:
+				tg.pos += bpush
+				var bn := bpush.normalized()
+				var bvn: float = tg.vel.dot(bn)
+				if bvn < 0.0:
+					tg.vel -= 2.0 * bvn * bn
 
 
 func _update_bumpers(dt: float) -> void:
@@ -3283,6 +3772,30 @@ func _draw_arena() -> void:
 	draw_line(e, e - Vector2(l, 0.0), c, 3.0, true)
 	draw_line(e, e - Vector2(0.0, l), c, 3.0, true)
 
+	# Versus map structures, culled to the view. Solo never builds walls.
+	if not duel_walls.is_empty():
+		var vis2 := _view_rect().grow(80.0)
+		var pulse2 := 0.55 + 0.25 * sin(t * 2.4)
+		for poly in duel_walls:
+			var pl: Array = poly
+			if pl.size() < 3:
+				continue
+			var pts := PackedVector2Array(pl)
+			var lo: Vector2 = pts[0]
+			var hi: Vector2 = pts[0]
+			for q2 in pts:
+				var qv: Vector2 = q2
+				lo.x = minf(lo.x, qv.x)
+				lo.y = minf(lo.y, qv.y)
+				hi.x = maxf(hi.x, qv.x)
+				hi.y = maxf(hi.y, qv.y)
+			if not vis2.intersects(Rect2(lo, hi - lo)):
+				continue
+			draw_colored_polygon(pts, Color(0.05, 0.10, 0.20, 0.92))
+			var ring := PackedVector2Array(pts)
+			ring.append(pts[0])
+			draw_polyline(ring, Color(0.45, 0.85, 1.0, pulse2), 3.0, true)
+
 
 ## Animated molten band along the bottom of the world.
 func _draw_lava() -> void:
@@ -3711,6 +4224,8 @@ func _draw_hud() -> void:
 		var tc := RED if p < 0.25 else CYAN
 		draw_rect(Rect2(bx, by, bw * p, 6.0), tc)
 	_text_center_at(Vector2(640.0, 40.0), "%ds" % int(ceil(time_left)), 13, Color(0.72, 0.88, 1.0, 0.85))
+	if net_mode != "off" and mode == "play" and not duel_walls.is_empty():
+		_text_center_at(Vector2(640.0, 78.0), _duel_map_name(duel_map), 11, Color(0.55, 0.85, 1.0, 0.6))
 
 	if combo > 1:
 		_text_center_at(Vector2(640.0, 60.0), "COMBO x%d" % combo, 12, GOLD)
@@ -3740,7 +4255,32 @@ func _draw_hud() -> void:
 
 
 func _duel_foe_name(o: int) -> String:
+	if o >= 0 and o < duel_foes.size():
+		var nm := str((duel_foes[o] as Dictionary).get("name", ""))
+		if nm != "":
+			return nm
 	return "FOE" if o == 0 else "FOE %d" % (o + 1)
+
+
+## My display name, or the old YOU label when the box was left blank.
+func _duel_my_name() -> String:
+	var nm := str(duel_me.get("name", ""))
+	return nm if nm != "" else "YOU"
+
+
+## Winner's display name. duel_winner indexes _duel_all() on every peer, so
+## this reads the same fighter everywhere (unlike the foe-slot labels).
+func _duel_winner_name() -> String:
+	var allf := _duel_all()
+	if duel_winner >= 0 and duel_winner < allf.size():
+		var nm := str((allf[duel_winner] as Dictionary).get("name", ""))
+		if nm != "":
+			return nm
+		if duel_winner == duel_my_id:
+			return _duel_my_name()
+		var foe_o := duel_winner if duel_my_id < 0 else duel_winner - 1
+		return "FOE" if foe_o == 0 else "FOE %d" % (foe_o + 1)
+	return "DRAW"
 
 
 func _duel_foe_col(o: int) -> Color:
@@ -3750,7 +4290,7 @@ func _duel_foe_col(o: int) -> Color:
 ## Duel corners: my health + gun, then every rival stacked top-right.
 func _draw_duel_corners() -> void:
 	var watching := _duel_watching()
-	_text("SPECTATING" if watching else "YOU", Vector2(48.0, 28.0), 11, DIM)
+	_text("SPECTATING" if watching else _duel_my_name(), Vector2(48.0, 28.0), 11, DIM)
 	var w := _duel_watch_target() if watching else {}
 	var my_hp := int(w.get("hp", 0)) if watching else int(duel_me.get("hp", DUEL_HP))
 	var my_gun := 0 if watching else int(duel_me.get("gun", 0))
@@ -3940,6 +4480,26 @@ func _net_button(r: Rect2, label: String, mp: Vector2) -> void:
 	_text_center_at(r.get_center() + Vector2(0.0, 9.0), label, fs, WHITE, bold_font)
 
 
+## Editable display-name field. The YOU placeholder lives inside the box
+## until you type; the host files the real name at match start and FOE
+## labels fill in for rivals who skipped theirs. The big box lives on
+## the menu/join screens; the small bare one on the host/ready screens.
+func _draw_name_field(rect: Rect2) -> void:
+	draw_rect(rect, Color(0.06, 0.13, 0.24, 0.9))
+	draw_rect(rect, CYAN if name_focused else Color(0.42, 0.66, 1.0, 0.5), false, 2.0)
+	var caret := "_" if name_focused and int(t * 2.0) % 2 == 0 else ""
+	var big := rect.size.y > 34.0
+	var cy := rect.get_center().y + (8.0 if big else 6.0)
+	if duel_my_name != "":
+		_text_center_at(Vector2(640.0, cy), duel_my_name + caret, 22 if big else 17, WHITE, bold_font)
+	else:
+		_text_center_at(Vector2(640.0, cy), "YOU" + caret, 22 if big else 17, DIM, bold_font)
+
+
+func _draw_name_box() -> void:
+	_draw_name_field(NET_NAME_RECT)
+
+
 func _draw_net() -> void:
 	draw_rect(Rect2(0.0, 0.0, 1280.0, 720.0), Color(0.015, 0.020, 0.045, 0.72))
 	var panel := Rect2(340.0, 140.0, 600.0, 440.0)
@@ -3951,7 +4511,8 @@ func _draw_net() -> void:
 	if net_screen == "menu":
 		_net_button(BTN_NET_HOST, "HOST GAME", mp)
 		_net_button(BTN_NET_JOIN, "JOIN GAME", mp)
-		_text_center_at(Vector2(640.0, 470.0), "up to 4 players - shared arena - last one standing wins", 14, DIM)
+		_draw_name_box()
+		_text_center_at(Vector2(640.0, 470.0), "open lobby - shared arena - last one standing wins", 14, DIM)
 	elif net_screen == "join":
 		_text_center_at(Vector2(640.0, 250.0), "ENTER HOST IP", 18, DIM)
 		draw_rect(NET_IP_RECT, Color(0.06, 0.13, 0.24, 0.9))
@@ -3959,10 +4520,12 @@ func _draw_net() -> void:
 		var caret := "_" if join_focused and int(t * 2.0) % 2 == 0 else ""
 		_text_center_at(Vector2(640.0, 312.0), join_ip + caret, 24, WHITE, bold_font)
 		_net_button(BTN_NET_JOIN, "JOIN", mp)
+		_draw_name_box()
 		if net_status != "":
 			_text_center_at(Vector2(640.0, 460.0), net_status, 16, RED)
 	elif net_screen == "host":
-		_text_center_at(Vector2(640.0, 260.0), "HOSTING ON - CLICK AN ADDRESS TO COPY IT", 16, DIM)
+		_draw_name_field(NET_NAME_RECT_SM)
+		_text_center_at(Vector2(640.0, 278.0), "HOSTING ON - CLICK AN ADDRESS TO COPY IT", 16, DIM)
 		var ips := _net_host_addrs()
 		net_ip_rects.clear()
 		for i in mini(ips.size(), 4):
@@ -3970,24 +4533,43 @@ func _draw_net() -> void:
 			var entry: Dictionary = ips[i]
 			var line := str(entry["copy"])
 			var shown := line if str(entry["label"]) == "" else "%s  (%s)" % [line, str(entry["label"])]
-			var yp := 306.0 + i * 34.0
+			var yp := 320.0 + i * 34.0
 			_text_center_at(Vector2(640.0, yp), shown, 26 if big else 19, WHITE if big else DIM, bold_font)
 			net_ip_rects.append({"rect": Rect2(640.0 - 220.0, yp - 16.0, 440.0, 32.0), "text": shown, "copy": line})
 		if t - net_copied_at < 1.5:
-			_text_center_at(Vector2(640.0, 330.0 + maxi(0, mini(ips.size(), 4) - 1) * 34.0), "COPIED!", 16, Color(0.5, 1.0, 0.6))
+			_text_center_at(Vector2(640.0, 344.0 + maxi(0, mini(ips.size(), 4) - 1) * 34.0), "COPIED!", 16, Color(0.5, 1.0, 0.6))
 		var rivals := multiplayer.get_peers().size()
-		var cap := DUEL_MAX_PLAYERS if not duel_host_plays else DUEL_MAX_PLAYERS - 1
-		_text_center_at(Vector2(640.0, 320.0 + mini(ips.size(), 4) * 34.0), "waiting for rivals... (%d/%d)" % [rivals, cap], 18, Color(0.85, 0.97, 1.0, 0.5 + 0.5 * sin(t * 4.0)))
-		_text_center_at(Vector2(640.0, 350.0 + mini(ips.size(), 4) * 34.0), "RIVAL STUCK ON CONNECTING? ALLOW UDP 7777 IN WINDOWS FIREWALL", 13, DIM)
+		_text_center_at(Vector2(640.0, 334.0 + mini(ips.size(), 4) * 34.0), "waiting for rivals... (%d in lobby)" % rivals, 18, Color(0.85, 0.97, 1.0, 0.5 + 0.5 * sin(t * 4.0)))
+		_text_center_at(Vector2(640.0, 364.0 + mini(ips.size(), 4) * 34.0), "RIVAL STUCK ON CONNECTING? ALLOW UDP 7777 IN WINDOWS FIREWALL", 13, DIM)
 		_net_button(BTN_NET_ROLE, "HOST FIGHTS" if duel_host_plays else "HOST SPECTATES", mp)
 	elif net_screen == "ready":
 		if net_mode == "host":
+			_draw_name_field(NET_NAME_RECT_SM)
 			_text_center_at(Vector2(640.0, 300.0), "RIVALS READY: %d" % multiplayer.get_peers().size(), 26, CYAN, bold_font)
 			_net_button(BTN_NET_ROLE2, "HOST FIGHTS" if duel_host_plays else "HOST SPECTATES", mp)
 			_net_button(BTN_START, "START", mp)
 		else:
+			_draw_name_field(NET_NAME_RECT_SM)
 			_text_center_at(Vector2(640.0, 300.0), "RIVAL FOUND", 26, CYAN, bold_font)
 			_text_center_at(Vector2(640.0, 400.0), "waiting for host to start...", 18, DIM)
+	elif net_screen == "roulette":
+		_text_center_at(Vector2(640.0, 110.0), "MAP ROULETTE", 40, WHITE, bold_font)
+		var roff := _roulette_offset()
+		var rcen := _roulette_center()
+		for i in roulette_strip.size():
+			var cx := 640.0 + float(i) * ROULETTE_PITCH + roff
+			if cx < -220.0 or cx > 1500.0:
+				continue
+			_roulette_card(Rect2(cx - 150.0, 200.0, 300.0, 280.0), int(roulette_strip[i]), i == rcen)
+		for sx in [-1.0, 1.0]:
+			var bx: float = 640.0 + (sx as float) * 162.0
+			draw_line(Vector2(bx, 190.0), Vector2(bx - sx * 26.0, 190.0), GOLD, 4.0, true)
+			draw_line(Vector2(bx, 490.0), Vector2(bx - sx * 26.0, 490.0), GOLD, 4.0, true)
+		if roulette_t <= 0.0:
+			_text_center_at(Vector2(640.0, 556.0), _duel_map_name(roulette_win), 44, GOLD, bold_font)
+			_text_center_at(Vector2(640.0, 602.0), "GET READY!", 18, DIM)
+		else:
+			_text_center_at(Vector2(640.0, 580.0), "spinning...", 18, DIM)
 	elif net_screen == "countdown":
 		_text_center_at(Vector2(640.0, 360.0), str(maxi(int(ceil(net_count)), 1)), 96, WHITE, bold_font)
 	_net_button(BTN_BACK, "BACK", mp)
@@ -4041,11 +4623,11 @@ func _draw_game_over() -> void:
 	if net_mode != "off" and duel_over:
 		var i_won := duel_winner == duel_my_id
 		var dh := "YOU WIN" if i_won else ("DRAW" if duel_winner < 0 else "YOU LOSE")
-		var sub := "YOU  %d HP" % int(duel_me.get("hp", 0))
+		var sub := "%s  %d HP" % [_duel_my_name(), int(duel_me.get("hp", 0))]
 		if duel_my_id < 0:
 			sub = "SPECTATED MATCH"
 			if duel_winner >= 0:
-				dh = "%s WINS" % _duel_foe_name(duel_winner)
+				dh = "%s WINS" % _duel_winner_name()
 		_text_center_at(Vector2(640.0, 250.0), dh, 68, PINK, bold_font)
 		_text_center_at(Vector2(640.0, 340.0), sub, 40, WHITE, bold_font)
 		var oy := 392.0

@@ -24,7 +24,7 @@ godot --path .
 | Hold left mouse | Charge a launch (time slows down while you aim) |
 | Release | Fire toward the cursor; hold longer = more power |
 | Space | Same as mouse, for keyboard play |
-| Right mouse / F | Shoot equipped gun toward cursor (versus duel) |
+| Right mouse / F | Shoot equipped gun toward cursor (versus duel) - every shot kicks you backwards |
 | Touch: 1 finger | Same as left mouse — hold to charge, release to fire |
 | Touch: gun stick | 2nd finger plants a stick — push to aim, hold to shoot |
 | R | Restart (rematch in versus) |
@@ -35,10 +35,13 @@ godot --path .
 ## Multiplayer versus
 
 Title → MULTIPLAYER: one player HOSTs, the other JOINs with the host's IP
-(port 7777, or `IP:port` for a custom port). Versus is a duel in a sharedarena: every fighter has 100 HP. Breaking a chest instantly equips
+(port 7777, or `IP:port` for a custom port). Type your display name in
+the YOUR NAME box first (blank stays YOU, rivals who skip it show as
+FOE) — names ride with the roster and show over fighters, in the
+corners, and on the winners screen. Versus is a duel in a sharedarena: every fighter has 100 HP. Breaking a chest instantly equips
 PISTOL, then SPREAD once armed — no pickup walk-over. Fresh crates drop
-into the arena every few seconds.The molten floor burns fighters that touch it (15 damage per second). Shoot the rivals (RMB or F toward the cursor). Up to 4 fighters share one arena (host + 3 rivals, or 4 rivals if the host sits out) — knock everyone
-else out, or hold the most HP when the 60s clock runs out, to win.
+into the arena every few seconds.The molten floor burns fighters that touch it (15 damage per second). Shoot the rivals (RMB or F toward the cursor). Any number of fighters share one arena (rivals join freely; the host may also sit out and spectate) — knock everyone
+else out to win — only the last fighter standing takes it. If the 60s clock runs out with two or more fighters alive, the round is a draw. Hitting START spins a Fall-Guys-style map roulette: five arenas (OPEN FIELD, PILLARS, CROSSROADS, TWIN GATES, STAR FORT) scroll past and land on a random one — simple polygonic slabs everyone collides with, drawn in neon, with spawns, balls, crates and bullets all playing around them.
 If you die while the round goes on, you spectate: the camera follows the
 remaining fighters until someone wins. The host can also sit out entirely
 with the HOST FIGHTS / HOST SPECTATES toggle in the lobby. Edge arrows point
@@ -51,7 +54,12 @@ skip VPN/virtual ones). Both PCs must be on the same network, and the host
 must allow the game through the Windows firewall (UDP port 7777).
 If joining hangs, it fails after ~12s. Mid-match the netcode favors staying
 in: snapshots are small (fighters + packed bullets 20 Hz, balls 10 Hz,
-~500 Kbps) and ENet waits out long WiFi hiccups before dropping anyone.
+~550 Kbps) and ENet waits out long WiFi hiccups before dropping anyone.
+Green drifters also ship their velocity, so joiners glide them locally
+at full frame rate instead of jump-cutting between snapshots.
+Your own shots, pickups and chest breaks predict instantly on your
+screen (the host verdict lands ~50 ms later), and rival gunfire
+flashes its muzzle on arrival.
 Inputs send unreliably, so one dropped packet costs one shot instead of
 stalling every shot; launches echo twice so a lost packet can't strand
 you, and stale out-of-order snapshots are ignored. If your link does degrade, the
