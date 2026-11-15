@@ -2506,6 +2506,7 @@ func _update_streaming(dt: float) -> void:
 		return
 	stream_t = STREAM_INTERVAL * (1.0 if net_mode != "off" else SINGLEPLAYER_SPAWN_SCALE)
 
+
 	var view := _view_rect()
 	var keep := view.grow(STREAM_KEEP)
 	for i in range(targets.size() - 1, -1, -1):
