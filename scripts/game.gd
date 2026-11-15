@@ -473,8 +473,8 @@ func _update_net_edits() -> void:
 			ip_edit.add_theme_font_size_override("font_size", 24)
 			if not ip_edit.has_focus() and ip_edit.text != join_ip:
 				ip_edit.text = join_ip
-			elif ip_edit.has_focus():
-				ip_edit.release_focus()
+		elif ip_edit.has_focus():
+			ip_edit.release_focus()
 
 
 func _on_name_changed(new_text: String) -> void:
