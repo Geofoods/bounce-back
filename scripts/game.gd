@@ -91,15 +91,19 @@ const BALL_NAMES := ["CYAN", "PINK", "GOLD", "GREEN", "PURPLE"]
 # Photo ball skins: circular portraits drawn over the ball.
 const BALL_FACE_PATHS := ["res://images (2)-modified.png", "res://Kai_Cenat-modified.png", "res://LacyHimself-modified.png"]
 const BALL_FACE_NAMES := ["FACE", "KAI", "LACY"]
-const CUSTOM_LABELS := ["BALL", "TRAIL", "SHAKE", "GLOW", "SOUND"]
+const HOST_QR_PATH := "res://bing_generated_qrcode.png"
+const CUSTOM_LABELS := ["BALL", "TRAIL", "SHAKE", "GLOW", "SOUND", "MOBILE"]
 const BTN_START := Rect2(490.0, 532.0, 300.0, 56.0)
-const BTN_CUSTOM := Rect2(490.0, 596.0, 146.0, 40.0)
+const BTN_CUSTOM := Rect2(413.0, 596.0, 146.0, 40.0)
+const BTN_SETTINGS := Rect2(721.0, 596.0, 146.0, 40.0)
 const BTN_BACK := Rect2(540.0, 596.0, 200.0, 44.0)
 # Online versus (mirrored arenas, Godot ENet, no outside services).
 const NET_PORT := 7777
-const BTN_NET := Rect2(644.0, 596.0, 146.0, 40.0)
-const BTN_NET_HOST := Rect2(440.0, 280.0, 400.0, 56.0)
+const BTN_NET := Rect2(567.0, 596.0, 146.0, 40.0)
+const BTN_NET_HOST := Rect2(440.0, 280.0, 196.0, 56.0)
+const BTN_NET_HOST_WS := Rect2(644.0, 280.0, 196.0, 56.0)
 const BTN_NET_JOIN := Rect2(440.0, 348.0, 400.0, 52.0)
+const BTN_NET_PROTO := Rect2(490.0, 486.0, 300.0, 30.0)
 const BTN_NET_ROLE := Rect2(490.0, 510.0, 300.0, 44.0)
 const BTN_NET_ROLE2 := Rect2(490.0, 360.0, 300.0, 44.0)
 const NET_IP_RECT := Rect2(440.0, 280.0, 400.0, 48.0)
@@ -206,6 +210,7 @@ var ball_flash: float = 0.0
 var trail: Array = []
 
 var ball_faces: Array = []
+var host_qr_tex: Texture2D
 
 var charging: bool = false
 var charge_t: float = 0.0
@@ -218,17 +223,22 @@ var stick_id := -1        # second finger driving the gun stick; -1 = stowed
 var stick_on := false
 var stick_base := Vector2.ZERO   # screen-space anchor + knob of the gun stick
 var stick_knob := Vector2.ZERO
+var stick_mouse := false      # true while the mouse (not a finger) drives the stick
 const STICK_R := 70.0     # gun-stick travel in screen px
+const STICK_HOME := Vector2(150.0, 570.0)  # fixed joystick spot when mobile controls are on
+const STICK_GRAB := 110.0                   # grab radius around the home spot
 
 # customization (persisted to user://bounce_back.cfg)
 var ball_idx := 0
 var trail_opt := true
 var shake_opt := true
 var glow_opt := true
+var mobile_controls := false  # settings checkbox: fixed shooting joystick in versus
 
 # online versus: off | host | client; screens menu|join|host|ready|countdown
 var net_mode := "off"
 var net_screen := "menu"
+var net_transport := "enet"  # host/join link: enet (desktop) | ws (browser can join)
 var net_status := ""
 var net_count := 0.0
 var net_send_t := 0.0
@@ -321,6 +331,7 @@ func _ready() -> void:
 	_setup_audio()
 	_setup_post_fx()
 	_setup_ball_faces()
+	_setup_host_qr()
 	_load_best()
 	_load_custom()
 	_enter_title()
@@ -336,6 +347,28 @@ func _setup_ball_faces() -> void:
 			ball_faces.append(tex)
 		else:
 			ball_faces.append(null)
+
+
+## Host-lobby QR code (res://bing_generated_qrcode.png). Loaded once; the host
+## screen simply skips it if the file is missing.
+func _setup_host_qr() -> void:
+	if ResourceLoader.exists(HOST_QR_PATH):
+		host_qr_tex = load(HOST_QR_PATH) as Texture2D
+
+
+## QR card docked to the right of the host panel. White backing keeps the
+## code scannable against the dark lobby background.
+func _draw_host_qr() -> void:
+	if host_qr_tex == null:
+		return
+	var card := Rect2(958.0, 250.0, 172.0, 210.0)
+	draw_rect(card.grow(4.0), Color(0.02, 0.05, 0.10, 0.85))
+	draw_rect(card, Color(0.03, 0.07, 0.14, 0.92))
+	draw_rect(card, Color(0.40, 0.72, 1.0, 0.35), false, 2.0)
+	var qr := Rect2(973.0, 265.0, 142.0, 142.0)
+	draw_rect(qr.grow(6.0), Color.WHITE)
+	draw_texture_rect(host_qr_tex, qr, false)
+	_text_center_at(Vector2(1044.0, 435.0), "SCAN TO JOIN", 13, DIM)
 
 
 func _ball_total_skins() -> int:
@@ -531,6 +564,7 @@ func _load_custom() -> void:
 		trail_opt = bool(cfg.get_value("custom", "trail", true))
 		shake_opt = bool(cfg.get_value("custom", "shake", true))
 		glow_opt = bool(cfg.get_value("custom", "glow", true))
+		mobile_controls = bool(cfg.get_value("custom", "mobile", false))
 		muted = bool(cfg.get_value("custom", "muted", false))
 
 
@@ -541,6 +575,7 @@ func _save_custom() -> void:
 	cfg.set_value("custom", "trail", trail_opt)
 	cfg.set_value("custom", "shake", shake_opt)
 	cfg.set_value("custom", "glow", glow_opt)
+	cfg.set_value("custom", "mobile", mobile_controls)
 	cfg.set_value("custom", "muted", muted)
 	cfg.save("user://bounce_back.cfg")
 
@@ -570,6 +605,8 @@ func _custom_on(i: int) -> bool:
 			return glow_opt
 		4:
 			return not muted
+		5:
+			return mobile_controls
 	return true
 
 
@@ -592,18 +629,64 @@ func _cycle_custom(i: int) -> void:
 			if muted:
 				for p in players:
 					p.stop()
+		5:
+			mobile_controls = not mobile_controls
 	_save_custom()
 	_sfx("bounce", 0.0, -18.0)
+
+
+## Touch tap in a menu: same button as a mouse click, so the whole menu
+## stack (including the mobile-controls checkbox) works without a mouse.
+func _menu_tap(pos: Vector2) -> void:
+	if mode == "title":
+		if BTN_START.has_point(pos):
+			_start_game()
+		elif BTN_CUSTOM.has_point(pos):
+			mode = "custom"
+		elif BTN_SETTINGS.has_point(pos):
+			mode = "settings"
+		elif BTN_NET.has_point(pos):
+			mode = "net"
+			net_screen = "menu"
+			net_status = ""
+			name_focused = true
+			join_focused = false
+	elif mode == "custom":
+		_custom_click(pos)
+	elif mode == "settings":
+		_settings_click(pos)
+	elif mode == "net":
+		_net_click(pos)
+	elif mode == "over":
+		if net_mode == "off":
+			_start_game()
 
 
 func _custom_click(mp: Vector2) -> void:
 	if BTN_BACK.has_point(mp):
 		mode = "title"
 		return
-	for i in 5:
+	for i in 6:
 		if _custom_row_rect(i).has_point(mp):
 			_cycle_custom(i)
 			return
+
+
+## Settings screen: main-menu button that opens its own screen. Holds the
+## MOBILE CONTROLS checkbox (shared with the CUSTOMIZE row), so touch and
+## mouse users alike find it from the main menu.
+func _settings_row_rect() -> Rect2:
+	return Rect2(380.0, 260.0, 520.0, 48.0)
+
+
+func _settings_click(mp: Vector2) -> void:
+	if BTN_BACK.has_point(mp):
+		mode = "title"
+		return
+	if _settings_row_rect().has_point(mp):
+		mobile_controls = not mobile_controls
+		_save_custom()
+		_sfx("bounce", 0.0, -18.0)
 
 
 func _connect_net_signals() -> void:
@@ -650,14 +733,22 @@ func _net_host_addrs() -> Array:
 			order += 1
 	var out: Array = []
 	var seen := {}
+	# Browser rivals join with a ws:// URL; desktop ENet rivals use plain ip:port.
+	var ws := net_transport == "ws" and net_mode == "host"
 	for r in 4:
 		for c in cands:
 			if int((c as Dictionary)["rank"]) != r or seen.has(str((c as Dictionary)["ip"])):
 				continue
 			seen[str((c as Dictionary)["ip"])] = true
-			out.append({"copy": "%s:%d" % [str((c as Dictionary)["ip"]), NET_PORT], "label": str((c as Dictionary)["label"])})
+			if ws:
+				out.append({"copy": "ws://%s:%d" % [str((c as Dictionary)["ip"]), NET_PORT], "label": str((c as Dictionary)["label"])})
+			else:
+				out.append({"copy": "%s:%d" % [str((c as Dictionary)["ip"]), NET_PORT], "label": str((c as Dictionary)["label"])})
 	if out.is_empty():
-		out.append({"copy": "127.0.0.1:%d" % NET_PORT, "label": ""})
+		if ws:
+			out.append({"copy": "ws://127.0.0.1:%d" % NET_PORT, "label": ""})
+		else:
+			out.append({"copy": "127.0.0.1:%d" % NET_PORT, "label": ""})
 	return out
 
 
@@ -671,13 +762,24 @@ func _net_is_private(s: String) -> bool:
 	return false
 
 
-func _net_host() -> void:
+## Desktop hosts pick a link: enet (desktop rivals) or ws (websocket lobby
+## that browser rivals can join). Browsers cannot listen, so hosting stays
+## desktop-only; the websocket server speaks plain ws:// on NET_PORT.
+func _net_host(transport: String = "enet") -> void:
 	_net_leave_quiet()
-	var peer := ENetMultiplayerPeer.new()
-	if peer.create_server(NET_PORT, DUEL_SERVER_PEERS) != OK:
-		net_status = "HOST FAILED"
-		return
-	multiplayer.multiplayer_peer = peer
+	net_transport = "ws" if transport == "ws" else "enet"
+	if net_transport == "ws":
+		var wpeer := WebSocketMultiplayerPeer.new()
+		if wpeer.create_server(NET_PORT) != OK:
+			net_status = "HOST FAILED"
+			return
+		multiplayer.multiplayer_peer = wpeer
+	else:
+		var peer := ENetMultiplayerPeer.new()
+		if peer.create_server(NET_PORT, DUEL_SERVER_PEERS) != OK:
+			net_status = "HOST FAILED"
+			return
+		multiplayer.multiplayer_peer = peer
 	net_mode = "host"
 	net_screen = "host"
 	_connect_net_signals()
@@ -691,21 +793,63 @@ func _net_join(ip: String) -> void:
 		return
 	# Committed: the field is gone, so its focus (and key repeat) ends here.
 	join_focused = false
-	# Optional :port suffix (one colon only, so IPv6 stays the host).
-	var host := join_ip
-	var port := NET_PORT
-	if join_ip.count(":") == 1:
-		var cut := join_ip.rfind(":")
-		var maybe_port := join_ip.substr(cut + 1)
-		if maybe_port == "" or maybe_port.is_valid_int():
-			host = join_ip.substr(0, cut)
-			if maybe_port != "":
-				port = clampi(maybe_port.to_int(), 1, 65535)
-	var peer := ENetMultiplayerPeer.new()
-	if peer.create_client(host, port) != OK:
-		net_status = "JOIN FAILED"
-		return
-	multiplayer.multiplayer_peer = peer
+	# Websocket join when the field holds a ws:// or wss:// URL, when the
+	# game runs in a browser (ENet cannot dial out there), or when the
+	# join screen toggle picked ws. Plain "ip" / "ip:port" stay ENet.
+	var low := join_ip.to_lower()
+	var want_ws := net_transport == "ws" or OS.has_feature("web")
+	var scheme := "ws"
+	var rest := join_ip
+	if low.begins_with("ws://"):
+		want_ws = true
+		rest = join_ip.substr(5)
+	elif low.begins_with("wss://"):
+		want_ws = true
+		scheme = "wss"
+		rest = join_ip.substr(6)
+	if want_ws:
+		net_transport = "ws"
+		var path := ""
+		var slash := rest.find("/")
+		var hostport := rest
+		if slash >= 0:
+			hostport = rest.substr(0, slash)
+			path = rest.substr(slash)
+		var whost := hostport
+		var wport := NET_PORT
+		if hostport.count(":") == 1:
+			var wcut := hostport.rfind(":")
+			var wmaybe := hostport.substr(wcut + 1)
+			if wmaybe == "" or wmaybe.is_valid_int():
+				whost = hostport.substr(0, wcut)
+				if wmaybe != "":
+					wport = clampi(wmaybe.to_int(), 1, 65535)
+		if whost.strip_edges() == "":
+			net_status = "ENTER AN IP FIRST"
+			return
+		var url := "%s://%s:%d%s" % [scheme, whost.strip_edges(), wport, path]
+		var wpeer := WebSocketMultiplayerPeer.new()
+		if wpeer.create_client(url) != OK:
+			net_status = "JOIN FAILED"
+			return
+		multiplayer.multiplayer_peer = wpeer
+	else:
+		net_transport = "enet"
+		# Optional :port suffix (one colon only, so IPv6 stays the host).
+		var host := join_ip
+		var port := NET_PORT
+		if join_ip.count(":") == 1:
+			var cut := join_ip.rfind(":")
+			var maybe_port := join_ip.substr(cut + 1)
+			if maybe_port == "" or maybe_port.is_valid_int():
+				host = join_ip.substr(0, cut)
+				if maybe_port != "":
+					port = clampi(maybe_port.to_int(), 1, 65535)
+		var peer := ENetMultiplayerPeer.new()
+		if peer.create_client(host, port) != OK:
+			net_status = "JOIN FAILED"
+			return
+		multiplayer.multiplayer_peer = peer
 	net_mode = "client"
 	net_screen = "join"
 	net_status = "CONNECTING..."
@@ -952,6 +1096,7 @@ func _duel_reset(roster: Array = [], names: Array = [], map_idx: int = -1) -> vo
 	duel_chests.clear()
 	stick_on = false
 	stick_id = -1
+	stick_mouse = false
 	var offs := [Vector2(-260.0, -160.0), Vector2(260.0, -160.0), Vector2(-260.0, 160.0), Vector2(260.0, 160.0), Vector2(0.0, -340.0), Vector2(0.0, 340.0)]
 	for k in (4 if n <= 2 else 6):
 		duel_chests.append({"pos": _duel_clear_spot(c + offs[k], 70.0), "hp": DUEL_CHEST_HP})
@@ -1100,6 +1245,7 @@ func _net_duel(state: Array) -> void:
 		charging = false
 		charge_t = 0.0
 		stick_on = false
+		stick_mouse = false
 		_banner("ELIMINATED")
 	# Bullets fly ~1900 px/s, so adopting the 20 Hz snapshot raw would
 	# teleport them ~95 px per snap on the joiner's screen. Match each
@@ -1406,13 +1552,18 @@ func _net_click(mp: Vector2) -> void:
 	if net_screen == "menu":
 		if NET_NAME_RECT.has_point(mp):
 			name_focused = true
-		elif BTN_NET_HOST.has_point(mp):
+		elif not OS.has_feature("web") and BTN_NET_HOST.has_point(mp):
 			name_focused = false
-			_net_host()
+			_net_host("enet")
+		elif not OS.has_feature("web") and BTN_NET_HOST_WS.has_point(mp):
+			name_focused = false
+			_net_host("ws")
 		elif BTN_NET_JOIN.has_point(mp):
 			name_focused = false
 			join_focused = true
 			net_screen = "join"
+			if OS.has_feature("web"):
+				net_transport = "ws"
 		else:
 			name_focused = false
 	elif net_screen == "host" and net_mode == "host":
@@ -1436,7 +1587,9 @@ func _net_click(mp: Vector2) -> void:
 		else:
 			join_focused = false
 			name_focused = false
-			if BTN_NET_JOIN.has_point(mp):
+			if not OS.has_feature("web") and BTN_NET_PROTO.has_point(mp):
+				net_transport = "ws" if net_transport == "enet" else "enet"
+			elif BTN_NET_JOIN.has_point(mp):
 				_net_join(join_ip)
 	elif net_screen == "ready" and net_mode == "host":
 		if NET_NAME_RECT_SM.has_point(mp):
@@ -1491,39 +1644,69 @@ func _unhandled_input(event: InputEvent) -> void:
 	var st := event as InputEventScreenTouch
 	if st:
 		mouse_seen = true
+		if st.pressed and mode != "play":
+			_menu_tap(st.position)
+			return
 		if st.pressed:
+			# Fixed joystick owns its zone in versus when mobile controls are on:
+			# a press there is stick-only and never starts a bounce charge.
+			if mobile_controls and mode == "play" and net_mode != "off" and not duel_over and st.position.distance_to(STICK_HOME) <= STICK_GRAB:
+				if int(duel_me.get("hp", 0)) > 0:
+					if not stick_on:
+						_stick_take(STICK_HOME, st.position, st.index, false)
+					elif st.index == stick_id:
+						stick_knob = st.position
+				# This finger can never be the aim finger: drop it silently
+				# so lifting it does not fire a bounce.
+				if st.index == touch_aim_id:
+					touch_aim_id = -1
+				return
 			if touch_aim_id == -1:
 				touch_aim_id = st.index
 				mouse_pos = _touch_pos(st.position)
 				if mode == "play":
 					_begin_charge()
-			elif not stick_on and mode == "play" and net_mode != "off" and not duel_over and int(duel_me.get("hp", 0)) > 0:
+			elif not stick_on and not mobile_controls and mode == "play" and net_mode != "off" and not duel_over and int(duel_me.get("hp", 0)) > 0:
 				stick_on = true
 				stick_id = st.index
+				stick_mouse = false
 				stick_base = st.position
 				stick_knob = st.position
 		else:
-			if st.index == touch_aim_id:
-				touch_aim_id = -1
-				if mode == "play":
-					_fire()
-			elif st.index == stick_id:
+			# Joystick release has priority: it never fires a bounce, even if
+				# the same index somehow also matches the aim finger.
+			var was_stick := st.index == stick_id
+			if was_stick:
 				stick_on = false
 				stick_id = -1
+				stick_mouse = false
+			if st.index == touch_aim_id:
+				touch_aim_id = -1
+				if mode == "play" and not was_stick:
+					_fire()
 		return
 	var dr := event as InputEventScreenDrag
 	if dr:
+		if dr.index == stick_id and stick_on:
+			stick_knob = dr.position
+			return
 		if dr.index == touch_aim_id:
 			mouse_pos = _touch_pos(dr.position)
 			mouse_seen = true
-		elif dr.index == stick_id and stick_on:
-			stick_knob = dr.position
 		return
-	if event is InputEventMouseMotion:
+	var mm := event as InputEventMouseMotion
+	if mm:
 		mouse_seen = true
+		if stick_mouse and stick_on:
+			stick_knob = mm.position
 		return
 
 	var mb := event as InputEventMouseButton
+	if mb and not mb.pressed and stick_mouse and mb.button_index == MOUSE_BUTTON_LEFT:
+		stick_on = false
+		stick_id = -1
+		stick_mouse = false
+		return
 	if (touch_aim_id >= 0 or stick_on) and (mb and (mb.button_index == MOUSE_BUTTON_LEFT or mb.button_index == MOUSE_BUTTON_RIGHT)):
 		return
 	if mb and mb.button_index == MOUSE_BUTTON_RIGHT:
@@ -1533,12 +1716,20 @@ func _unhandled_input(event: InputEvent) -> void:
 	if mb and mb.button_index == MOUSE_BUTTON_LEFT:
 		if mb.pressed:
 			if mode == "play":
+				# Same priority for the mouse: the fixed joystick zone never
+				# starts a bounce charge, even while the stick is held.
+				if mobile_controls and net_mode != "off" and not duel_over and mb.position.distance_to(STICK_HOME) <= STICK_GRAB:
+					if int(duel_me.get("hp", 0)) > 0 and not stick_on:
+						_stick_take(STICK_HOME, mb.position, -2, true)
+					return
 				_begin_charge()
 			elif mode == "title":
 				if BTN_START.has_point(mb.position):
 					_start_game()
 				elif BTN_CUSTOM.has_point(mb.position):
 					mode = "custom"
+				elif BTN_SETTINGS.has_point(mb.position):
+					mode = "settings"
 				elif BTN_NET.has_point(mb.position):
 					mode = "net"
 					net_screen = "menu"
@@ -1548,6 +1739,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					join_focused = false
 			elif mode == "custom":
 				_custom_click(mb.position)
+			elif mode == "settings":
+				_settings_click(mb.position)
 			elif mode == "net":
 				_net_click(mb.position)
 			elif mode == "over":
@@ -2064,6 +2257,11 @@ func _physics_process(delta: float) -> void:
 			_update_targets(delta)
 			_update_particles(delta)
 			_update_popups(delta)
+		"settings":
+			_update_title_ball(delta)
+			_update_targets(delta)
+			_update_particles(delta)
+			_update_popups(delta)
 		"net":
 			_update_title_ball(delta)
 			_update_targets(delta)
@@ -2288,6 +2486,7 @@ func _update_duel(delta: float) -> void:
 			charging = false
 			charge_t = 0.0
 			stick_on = false
+			stick_mouse = false
 			_banner("ELIMINATED")
 		time_left -= delta
 		if time_left <= 0.0:
@@ -3021,6 +3220,21 @@ func _duel_spawn_shots(f: Dictionary, target: Vector2, owner: int = -1) -> void:
 	_sfx("shoot_low", 0.0, -8.0)
 
 
+## Claim the gun stick if this is a live versus fighter. Mouse claims pin
+## to the fixed home spot; touches may grab the home spot or float.
+func _stick_take(base: Vector2, knob: Vector2, idx: int, is_mouse: bool) -> bool:
+	if stick_on or duel_over or mode != "play" or net_mode == "off":
+		return false
+	if int(duel_me.get("hp", 0)) <= 0:
+		return false
+	stick_on = true
+	stick_id = idx
+	stick_mouse = is_mouse
+	stick_base = base
+	stick_knob = knob
+	return true
+
+
 ## Gun-stick deflection in screen space, dead-zoned and clamped to unit.
 func _stick_dir() -> Vector2:
 	if not stick_on:
@@ -3732,6 +3946,8 @@ func _draw() -> void:
 		_draw_game_over()
 	elif mode == "custom":
 		_draw_custom()
+	elif mode == "settings":
+		_draw_settings()
 	elif mode == "net":
 		_draw_net()
 
@@ -4446,6 +4662,10 @@ func _draw_duel_arrows() -> void:
 ## Gun stick (touch versus): base ring where the second finger landed, knob
 ## following the drag. Drawn in screen space, only while held.
 func _draw_stick() -> void:
+	if mobile_controls and not stick_on:
+		draw_arc(STICK_HOME, STICK_R, 0.0, TAU, 40, Color(1.0, 0.80, 0.30, 0.28), 2.0, true)
+		draw_circle(STICK_HOME, 5.0, Color(1.0, 0.80, 0.30, 0.4))
+		_text_center_at(STICK_HOME + Vector2(0.0, -100.0), "SHOOT", 13, Color(1.0, 0.85, 0.45, 0.55))
 	if not stick_on:
 		return
 	var pulse := 0.55 + 0.15 * sin(t * 4.0)
@@ -4507,7 +4727,7 @@ func _draw_custom() -> void:
 	draw_rect(panel, Color(0.40, 0.72, 1.0, 0.35), false, 2.0)
 	_text_center_at(Vector2(640.0, 196.0), "CUSTOMIZE", 34, WHITE, bold_font)
 	var mp := get_viewport().get_mouse_position()
-	for i in 5:
+	for i in 6:
 		var r := _custom_row_rect(i)
 		var hov := r.has_point(mp)
 		draw_rect(r, Color(0.10, 0.22, 0.38, 0.60) if hov else Color(0.06, 0.13, 0.24, 0.60))
@@ -4532,6 +4752,27 @@ func _draw_custom() -> void:
 	draw_rect(BTN_BACK, CYAN if hov_b else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
 	_text_center_at(BTN_BACK.get_center() + Vector2(0.0, 7.0), "BACK", 20, WHITE if hov_b else DIM, bold_font)
 	_text_center_at(Vector2(640.0, 700.0), "click a row to change it   ·   R starts the run", 12, Color(0.45, 0.60, 0.80, 0.55))
+
+
+func _draw_settings() -> void:
+	draw_rect(Rect2(0.0, 0.0, 1280.0, 720.0), Color(0.015, 0.020, 0.045, 0.72))
+	var panel := Rect2(340.0, 140.0, 600.0, 440.0)
+	draw_rect(panel.grow(6.0), Color(0.02, 0.05, 0.10, 0.85))
+	draw_rect(panel, Color(0.03, 0.07, 0.14, 0.92))
+	draw_rect(panel, Color(0.40, 0.72, 1.0, 0.35), false, 2.0)
+	_text_center_at(Vector2(640.0, 196.0), "SETTINGS", 34, WHITE, bold_font)
+	var mp := get_viewport().get_mouse_position()
+	var r := _settings_row_rect()
+	var hov := r.has_point(mp)
+	draw_rect(r, Color(0.10, 0.22, 0.38, 0.60) if hov else Color(0.06, 0.13, 0.24, 0.60))
+	draw_rect(r, Color(0.42, 0.66, 1.0, 0.35) if hov else Color(0.42, 0.66, 1.0, 0.18), false, 1.0)
+	_text("MOBILE CONTROLS", Vector2(r.position.x + 24.0, r.position.y + 32.0), 20, WHITE if hov else DIM)
+	_text_right("<  " + ("ON" if mobile_controls else "OFF") + "  >", Vector2(r.end.x - 24.0, r.position.y + 32.0), 20, CYAN if mobile_controls else DIM)
+	_text_center_at(Vector2(640.0, 340.0), "shows a fixed shooting joystick in versus", 14, DIM)
+	var hov_b := BTN_BACK.has_point(mp)
+	draw_rect(BTN_BACK, Color(0.10, 0.22, 0.30, 0.90) if hov_b else Color(0.05, 0.14, 0.20, 0.90))
+	draw_rect(BTN_BACK, CYAN if hov_b else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
+	_text_center_at(BTN_BACK.get_center() + Vector2(0.0, 7.0), "BACK", 20, WHITE if hov_b else DIM, bold_font)
 
 
 func _net_button(r: Rect2, label: String, mp: Vector2) -> void:
@@ -4571,18 +4812,29 @@ func _draw_net() -> void:
 	_text_center_at(Vector2(640.0, 196.0), "MULTIPLAYER", 34, WHITE, bold_font)
 	var mp := get_viewport().get_mouse_position()
 	if net_screen == "menu":
-		_net_button(BTN_NET_HOST, "HOST GAME", mp)
-		_net_button(BTN_NET_JOIN, "JOIN GAME", mp)
+		if OS.has_feature("web"):
+			_text_center_at(Vector2(640.0, 308.0), "HOSTING NEEDS THE DESKTOP BUILD", 18, DIM)
+			_net_button(BTN_NET_JOIN, "JOIN GAME", mp)
 		_draw_name_box()
-		_text_center_at(Vector2(640.0, 470.0), "open lobby - shared arena - last one standing wins", 14, DIM)
+		_text_center_at(Vector2(640.0, 470.0), "paste the ws:// address your desktop host copied", 14, DIM)
+		else:
+			_net_button(BTN_NET_HOST, "HOST (PC)", mp)
+			_net_button(BTN_NET_HOST_WS, "HOST (WEB)", mp)
+			_net_button(BTN_NET_JOIN, "JOIN GAME", mp)
+			_draw_name_box()
+		_text_center_at(Vector2(640.0, 470.0), "host pc = desktop rivals  ·  host web = browser rivals can join", 14, DIM)
 	elif net_screen == "join":
-		_text_center_at(Vector2(640.0, 250.0), "ENTER HOST IP", 18, DIM)
+		_text_center_at(Vector2(640.0, 250.0), "ENTER WS ADDRESS" if (net_transport == "ws" or OS.has_feature("web")) else "ENTER HOST IP", 18, DIM)
 		draw_rect(NET_IP_RECT, Color(0.06, 0.13, 0.24, 0.9))
 		draw_rect(NET_IP_RECT, CYAN if join_focused else Color(0.42, 0.66, 1.0, 0.5), false, 2.0)
 		var caret := "_" if join_focused and int(t * 2.0) % 2 == 0 else ""
 		_text_center_at(Vector2(640.0, 312.0), join_ip + caret, 24, WHITE, bold_font)
-		_net_button(BTN_NET_JOIN, "JOIN", mp)
+		_net_button(BTN_NET_JOIN, "JOIN" if net_transport == "enet" and not OS.has_feature("web") else "JOIN WEB", mp)
 		_draw_name_box()
+		if OS.has_feature("web"):
+			_text_center_at(Vector2(640.0, 486.0), "websocket link - paste the ws:// address", 13, DIM)
+		else:
+			_net_button(BTN_NET_PROTO, "LINK: PC" if net_transport == "enet" else "LINK: WEB", mp)
 		if net_status != "":
 			_text_center_at(Vector2(640.0, 460.0), net_status, 16, RED)
 	elif net_screen == "host":
@@ -4602,8 +4854,12 @@ func _draw_net() -> void:
 			_text_center_at(Vector2(640.0, 344.0 + maxi(0, mini(ips.size(), 4) - 1) * 34.0), "COPIED!", 16, Color(0.5, 1.0, 0.6))
 		var rivals := multiplayer.get_peers().size()
 		_text_center_at(Vector2(640.0, 334.0 + mini(ips.size(), 4) * 34.0), "waiting for rivals... (%d in lobby)" % rivals, 18, Color(0.85, 0.97, 1.0, 0.5 + 0.5 * sin(t * 4.0)))
-		_text_center_at(Vector2(640.0, 364.0 + mini(ips.size(), 4) * 34.0), "RIVAL STUCK ON CONNECTING? ALLOW UDP 7777 IN WINDOWS FIREWALL", 13, DIM)
+		if net_transport == "ws":
+			_text_center_at(Vector2(640.0, 364.0 + mini(ips.size(), 4) * 34.0), "RIVAL STUCK? ALLOW TCP 7777 - HTTPS PAGES NEED WSS, USE HTTP OR DESKTOP", 13, DIM)
+		else:
+			_text_center_at(Vector2(640.0, 364.0 + mini(ips.size(), 4) * 34.0), "RIVAL STUCK ON CONNECTING? ALLOW UDP 7777 IN WINDOWS FIREWALL", 13, DIM)
 		_net_button(BTN_NET_ROLE, "HOST FIGHTS" if duel_host_plays else "HOST SPECTATES", mp)
+		_draw_host_qr()
 	elif net_screen == "ready":
 		if net_mode == "host":
 			_draw_name_field(NET_NAME_RECT_SM)
@@ -4656,6 +4912,7 @@ func _draw_title() -> void:
 	var mp := get_viewport().get_mouse_position()
 	var hov_s := BTN_START.has_point(mp)
 	var hov_c := BTN_CUSTOM.has_point(mp)
+	var hov_st := BTN_SETTINGS.has_point(mp)
 	draw_rect(BTN_START, Color(0.10, 0.30, 0.38, 0.95) if hov_s else Color(0.06, 0.18, 0.26, 0.95))
 	draw_rect(BTN_START, CYAN if hov_s else Color(0.42, 0.66, 1.0, 0.70), false, 2.0)
 	_text_center_at(BTN_START.get_center() + Vector2(0.0, 9.0), "START", 26, WHITE, bold_font)
@@ -4666,6 +4923,9 @@ func _draw_title() -> void:
 	draw_rect(BTN_NET, Color(0.10, 0.22, 0.30, 0.90) if hov_n else Color(0.05, 0.14, 0.20, 0.90))
 	draw_rect(BTN_NET, CYAN if hov_n else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
 	_text_center_at(BTN_NET.get_center() + Vector2(0.0, 7.0), "MULTIPLAYER", 16, WHITE if hov_n else DIM, bold_font)
+	draw_rect(BTN_SETTINGS, Color(0.10, 0.22, 0.30, 0.90) if hov_st else Color(0.05, 0.14, 0.20, 0.90))
+	draw_rect(BTN_SETTINGS, CYAN if hov_st else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
+	_text_center_at(BTN_SETTINGS.get_center() + Vector2(0.0, 7.0), "SETTINGS", 16, WHITE if hov_st else DIM, bold_font)
 	if best > 0:
 		_text_center_at(Vector2(640.0, 662.0), "BEST  %d" % best, 16, DIM)
 	_text_center_at(Vector2(640.0, 700.0), "R restart   ·   M mute", 12, Color(0.45, 0.60, 0.80, 0.55))

@@ -25,6 +25,7 @@ godot --path .
 | Release | Fire toward the cursor; hold longer = more power |
 | Space | Same as mouse, for keyboard play |
 | Right mouse / F | Shoot equipped gun toward cursor (versus duel) - every shot kicks you backwards |
+| Customize > MOBILE | Fixed shooting joystick in versus (mouse or touch) |
 | Touch: 1 finger | Same as left mouse — hold to charge, release to fire |
 | Touch: gun stick | 2nd finger plants a stick — push to aim, hold to shoot |
 | R | Restart (rematch in versus) |
