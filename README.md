@@ -24,14 +24,29 @@ godot --path .
 | Hold left mouse | Charge a launch (time slows down while you aim) |
 | Release | Fire toward the cursor; hold longer = more power |
 | Space | Same as mouse, for keyboard play |
-| R | Restart |
+| Right mouse / F | Shoot equipped gun toward cursor (versus duel) |
+| R | Restart (rematch in versus) |
+| B | Back to menu (versus game-over) |
 | M | Mute |
 | Esc | Quit |
 
+## Multiplayer versus
+
+Title → MULTIPLAYER: one player HOSTs, the other JOINs with the host's IP
+(port 7777, or `IP:port` for a custom port). Versus is a duel in a sharedarena: every fighter has 100 HP, slams into chests to break them, grabs
+PISTOL then SPREAD pickups, and shoots the rivals (RMB or F toward the
+cursor). Up to 4 players (host + 3) share one arena — knock everyone
+else out, or hold the most HP when the 60s clock runs out, to win.
+Knocked-out fighters spectate while the rest finish. Pink/green balls
+also spawn — smashing one heals +6 HP and reloads your launch
+(one bounce per ball smashed). If joining hangs, it fails after ~12s: use an address from the host's
+list that shares your LAN, and allow the game through the Windows firewall
+(UDP port 7777).
+
 ## How it plays
 
-- **Slow is safe, fast is deadly.** Targets only break if you hit them above a
-  speed threshold. A slow ball just bounces off with a `TOO SLOW` popup.
+- **Touch smashes plain balls.** Basic, drifter and chaser balls break on any
+  contact, fast or slow. Spiked balls still demand speed — a slow touch kills.
 - **Charging costs time.** The level clock keeps running in real time, even
   while the world is in slow motion, so lining up a shot is a trade-off.
 - **Aim is a straight line only.** The guide shows direction and charge length,
@@ -59,7 +74,7 @@ All the feel knobs are constants at the top of `scripts/game.gd`:
 
 ```gdscript
 const WORLD := Rect2(0, 0, 3840, 2560)  # ~9 screens of playfield
-const TARGET_POP := 56        # balls alive in the world at once
+const TARGET_POP := 130       # balls alive in the world at once
 const CAM_LERP := 4.6         # how tightly the camera chases the ball
 const CAM_LOOKAHEAD := 0.26   # how far ahead of the ball it leads
 const MIN_POWER := 470.0      # tap launch speed
