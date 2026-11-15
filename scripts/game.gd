@@ -221,6 +221,9 @@ var ui_t := 0.0    # seconds since the menu screen last changed; drives entrance
 var _ui_key := ""  # mode|net_screen combo ui_t measures
 var _ui_styles := {}  # cached StyleBoxFlat per fill/line/radius/border key
 
+func _ui_blink() -> float:
+	return fmod(ui_t, 1.0)
+
 # post fx
 var bloom_level: float = 0.35
 var vignette_t: float = 0.2
@@ -2006,6 +2009,7 @@ func _net_click(mp: Vector2) -> void:
 		elif BTN_NET_JOIN.has_point(mp):
 			if not _net_name_ok():
 				return
+			_update_net_edits()
 			_net_join(join_ip)
 	elif net_screen == "ready" and net_mode == "host":
 		if name_edit != null and NET_NAME_RECT_SM.has_point(mp):
@@ -5580,7 +5584,7 @@ func _draw_net() -> void:
 		if ip_edit == null or not ip_edit.visible:
 			draw_rect(NET_IP_RECT, Color(0.06, 0.13, 0.24, 0.9))
 			draw_rect(NET_IP_RECT, CYAN if join_focused else Color(0.42, 0.66, 1.0, 0.5), false, 2.0)
-			var caret := "_" if join_focused and int(t * 2.0) % 2 == 0 else ""
+			var caret := "_" if join_focused and int(_ui_blink() * 2.0) % 2 == 0 else ""
 			_text_center_at(Vector2(640.0, 312.0), join_ip + caret, 24, WHITE, bold_font)
 		_net_button(BTN_NET_JOIN, "JOIN" if net_transport == "enet" and not OS.has_feature("web") else "JOIN WEB", mp)
 		_draw_name_box()
