@@ -24,7 +24,7 @@ godot --path .
 | Hold left mouse | Charge a launch (time slows down while you aim) |
 | Release | Fire toward the cursor; hold longer = more power |
 | Space | Same as mouse, for keyboard play |
-| Right mouse / F | Shoot equipped gun toward cursor (versus duel) - every shot kicks you backwards |
+| Right mouse / F / Space (with gun) | Shoot equipped gun toward cursor (versus duel) - every shot kicks you backwards |
 | Customize > MOBILE | Fixed shooting joystick in versus (mouse or touch) |
 | Touch: 1 finger | Same as left mouse — hold to charge, release to fire |
 | Touch: gun stick | 2nd finger plants a stick — push to aim, hold to shoot |
@@ -41,7 +41,7 @@ the YOUR NAME box first (blank stays YOU, rivals who skip it show as
 FOE) — names ride with the roster and show over fighters, in the
 corners, and on the winners screen. Versus is a duel in a sharedarena: every fighter has 100 HP. Breaking a chest instantly equips
 one of 4 guns — rapid ASSAULT, 5-pellet BLASTER scatter, piercing LASER bolt, or a siege RAILGUN slug that punches through fighters and crates — no pickup walk-over. Fresh crates drop
-into the arena every few seconds.The molten floor burns fighters that touch it (15 damage per second). Shoot the rivals (RMB or F toward the cursor). Any number of fighters share one arena (rivals join freely; the host may also sit out and spectate) — knock everyone
+into the arena every few seconds.The molten floor burns fighters that touch it (15 damage per second). Shoot the rivals (RMB, F or Space toward the cursor). Any number of fighters share one arena (rivals join freely; the host may also sit out and spectate) — knock everyone
 else out to win — only the last fighter standing takes it. If the 60s clock runs out with two or more fighters alive, the round is a draw. Hitting START spins a Fall-Guys-style map roulette: five arenas (OPEN FIELD, PILLARS, CROSSROADS, TWIN GATES, STAR FORT) scroll past and land on a random one — simple polygonic slabs everyone collides with, drawn in neon, with spawns, balls, crates and bullets all playing around them.
 If you die while the round goes on, you spectate: the camera follows the
 remaining fighters until someone wins. The host can also sit out entirely
