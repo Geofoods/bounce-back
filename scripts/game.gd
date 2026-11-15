@@ -89,14 +89,20 @@ const PURPLE := Color(0.65, 0.55, 0.98)
 const BALL_SKINS := [CYAN, PINK, GOLD, GREEN, PURPLE]
 const BALL_NAMES := ["CYAN", "PINK", "GOLD", "GREEN", "PURPLE"]
 # Photo ball skins: circular portraits drawn over the ball.
-const BALL_FACE_PATHS := ["res://images (2)-modified.png", "res://Kai_Cenat-modified.png", "res://LacyHimself-modified.png"]
-const BALL_FACE_NAMES := ["FACE", "KAI", "LACY"]
+const BALL_FACE_PATHS := ["res://images (2)-modified.png", "res://Kai_Cenat-modified.png", "res://LacyHimself-modified.png", "res://Rayasianboy_2025-modified.png"]
+const BALL_FACE_NAMES := ["MARLON", "KAI", "LACY", "RAY"]
 const HOST_QR_PATH := "res://bing_generated_qrcode.png"
 const CUSTOM_LABELS := ["BALL", "TRAIL", "SHAKE", "GLOW", "SOUND", "MOBILE"]
 const BTN_START := Rect2(490.0, 532.0, 300.0, 56.0)
 const BTN_CUSTOM := Rect2(413.0, 596.0, 146.0, 40.0)
 const BTN_SETTINGS := Rect2(721.0, 596.0, 146.0, 40.0)
 const BTN_BACK := Rect2(540.0, 596.0, 200.0, 44.0)
+# Main-menu chrome (BO3-style left column). Versus screens keep BTN_* above.
+const TITLE_PLAY := Rect2(110.0, 330.0, 300.0, 50.0)
+const TITLE_MULTI := Rect2(110.0, 388.0, 300.0, 50.0)
+const TITLE_CUSTOM := Rect2(110.0, 446.0, 300.0, 50.0)
+const TITLE_SETTINGS := Rect2(110.0, 504.0, 300.0, 50.0)
+const TITLE_QUIT := Rect2(110.0, 562.0, 300.0, 50.0)
 # Online versus (mirrored arenas, Godot ENet, no outside services).
 const NET_PORT := 7777
 const BTN_NET := Rect2(567.0, 596.0, 146.0, 40.0)
@@ -192,6 +198,8 @@ var banner: String = ""
 var banner_t: float = 0.0
 var muted: bool = false
 var t: float = 0.0
+var ui_t := 0.0    # seconds since the menu screen last changed; drives entrances
+var _ui_key := ""  # mode|net_screen combo ui_t measures
 
 # post fx
 var bloom_level: float = 0.35
@@ -250,6 +258,8 @@ var join_ip := "127.0.0.1"
 var join_focused := false
 var duel_my_name := ""    # my versus display name; blank falls back to YOU/FOE labels
 var name_focused := false  # typing into the name box (multiplayer menu/join screens)
+var name_edit: LineEdit  # real name field floating over the drawn lobby panels
+var ip_edit: LineEdit  # real address field floating over the drawn join panel
 var duel_peer_names := {}  # host-side: peer id -> cleaned name sent via _net_hello
 var net_ip_rects: Array = []  # clickable host-screen address lines ({rect, text})
 var net_copied_at := -99.0    # t when an address was last copied to the clipboard
@@ -272,7 +282,8 @@ const DUEL_LAVA_GRACE := 1.0      # seconds between lava burn ticks
 const DUEL_SERVER_PEERS := 64    # ENet connection slots; no game-level cap on fighters
 const DUEL_FOE_COLS := [Color(1.0, 0.55, 0.25), Color(0.75, 0.55, 1.0), Color(0.45, 1.0, 0.55)]
 const ROULETTE_T := 4.5          # fall-guys map spin length, seconds
-const ROULETTE_CARDS := 24       # cards in the deterministic strip
+const ROULETTE_CARDS := 24       # cards up to and including the winner
+const ROULETTE_TRAIL := 5        # extra cards past the winner so it stops mid-strip
 const ROULETTE_PITCH := 324.0    # card width + gap on the strip
 var duel_me := {}
 var duel_foe := {}              # first rival; alias of duel_foes[0] when present
@@ -298,7 +309,8 @@ var duel_maps_cache: Array = []  # lazy-built map defs (name + polys + bounds)
 var roulette_t := 0.0            # spin time left; 0 when settled
 var roulette_win := 0            # map the strip lands on
 var roulette_seed := 0           # shared strip shuffle; host picks, rpc delivers
-var roulette_strip: Array = []   # map indices scrolling past, winner last
+var roulette_strip: Array = []   # map indices scrolling past, winner mid-strip
+var roulette_stop := 0           # strip index the spin eases onto (the winner)
 var roulette_tick := -1          # centered card, for the tick sound
 var duel_balls_synced := false  # client applied one ball snapshot; first adopts silently
 var duel_launch_echo := 0  # leftover launch re-sends; one lost packet can't strand us
@@ -332,21 +344,10 @@ func _ready() -> void:
 	_setup_post_fx()
 	_setup_ball_faces()
 	_setup_host_qr()
+	_setup_net_edits()
 	_load_best()
 	_load_custom()
 	_enter_title()
-
-
-## Photo ball skins from res:// (*-modified.png). Loaded once; missing files
-## simply leave that skin empty and the ball falls back to its color ring.
-func _setup_ball_faces() -> void:
-	ball_faces.clear()
-	for p in BALL_FACE_PATHS:
-		if ResourceLoader.exists(p):
-			var tex: Texture2D = load(p)
-			ball_faces.append(tex)
-		else:
-			ball_faces.append(null)
 
 
 ## Host-lobby QR code (res://bing_generated_qrcode.png). Loaded once; the host
@@ -354,6 +355,125 @@ func _setup_ball_faces() -> void:
 func _setup_host_qr() -> void:
 	if ResourceLoader.exists(HOST_QR_PATH):
 		host_qr_tex = load(HOST_QR_PATH) as Texture2D
+
+
+## Real text fields for the net screens. Hand-rolled key handling can't pop
+## a mobile keyboard, accept lowercase/paste, or repeat properly, so the
+## name + address boxes are LineEdits skinned to match the lobby. They float
+## over the drawn panels; _update_net_edits() shows, hides and places them.
+func _setup_net_edits() -> void:
+	name_edit = LineEdit.new()
+	name_edit.placeholder_text = "YOU"
+	name_edit.max_length = 12
+	name_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_edit.context_menu_enabled = true
+	name_edit.add_theme_font_override("font", bold_font)
+	name_edit.add_theme_color_override("font_color", WHITE)
+	name_edit.add_theme_color_override("font_placeholder_color", DIM)
+	name_edit.add_theme_color_override("caret_color", CYAN)
+	_net_edit_boxes(name_edit)
+	name_edit.text_changed.connect(_on_name_changed)
+	name_edit.text_submitted.connect(_on_name_submitted)
+	name_edit.focus_entered.connect(_on_name_focus.bind(true))
+	name_edit.focus_exited.connect(_on_name_focus.bind(false))
+	name_edit.visible = false
+	add_child(name_edit)
+	ip_edit = LineEdit.new()
+	ip_edit.placeholder_text = "HOST ADDRESS"
+	ip_edit.max_length = 64
+	ip_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ip_edit.context_menu_enabled = true
+	ip_edit.add_theme_font_override("font", bold_font)
+	ip_edit.add_theme_color_override("font_color", WHITE)
+	ip_edit.add_theme_color_override("font_placeholder_color", DIM)
+	ip_edit.add_theme_color_override("caret_color", CYAN)
+	_net_edit_boxes(ip_edit)
+	ip_edit.text_changed.connect(_on_ip_changed)
+	ip_edit.text_submitted.connect(_on_ip_submitted)
+	ip_edit.focus_entered.connect(_on_ip_focus.bind(true))
+	ip_edit.focus_exited.connect(_on_ip_focus.bind(false))
+	ip_edit.visible = false
+	add_child(ip_edit)
+
+
+## Dark lobby styling for a net LineEdit: dim border idle, cyan on focus.
+## The focus box applies itself; no per-frame styling needed.
+func _net_edit_boxes(edit: LineEdit) -> void:
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0.06, 0.13, 0.24, 0.9)
+	normal.set_border_width_all(2)
+	normal.border_color = Color(0.42, 0.66, 1.0, 0.5)
+	var focus := normal.duplicate() as StyleBoxFlat
+	focus.border_color = CYAN
+	edit.add_theme_stylebox_override("normal", normal)
+	edit.add_theme_stylebox_override("focus", focus)
+
+
+## Shows/hides the real text fields to match the net screen and keeps them
+## in sync with duel_my_name / join_ip. Text is only pushed into a field
+## the player isn't editing, so typing never jumps under them.
+func _update_net_edits() -> void:
+	var want_name := mode == "net" and (net_screen == "menu" or net_screen == "join" or net_screen == "host" or net_screen == "ready")
+	var rect := NET_NAME_RECT
+	if net_screen == "host" or net_screen == "ready":
+		rect = NET_NAME_RECT_SM
+	var want_ip := mode == "net" and net_screen == "join"
+	if name_edit != null:
+		name_edit.visible = want_name
+		if want_name:
+			name_edit.position = rect.position
+			name_edit.size = rect.size
+			name_edit.add_theme_font_size_override("font_size", 17 if rect == NET_NAME_RECT_SM else 22)
+			if not name_edit.has_focus() and name_edit.text != duel_my_name:
+				name_edit.text = duel_my_name
+		elif name_edit.has_focus():
+			name_edit.release_focus()
+	if ip_edit != null:
+		ip_edit.visible = want_ip
+		if want_ip:
+			ip_edit.position = NET_IP_RECT.position
+			ip_edit.size = NET_IP_RECT.size
+			ip_edit.add_theme_font_size_override("font_size", 24)
+			if not ip_edit.has_focus() and ip_edit.text != join_ip:
+				ip_edit.text = join_ip
+			elif ip_edit.has_focus():
+				ip_edit.release_focus()
+
+
+func _on_name_changed(new_text: String) -> void:
+	duel_my_name = new_text.left(12)
+
+
+func _on_name_submitted(_text: String) -> void:
+	if name_edit != null:
+		name_edit.release_focus()
+
+
+func _on_ip_changed(new_text: String) -> void:
+	join_ip = new_text.left(64)
+
+
+func _on_ip_submitted(text: String) -> void:
+	_net_join(text)
+
+
+func _on_name_focus(on: bool) -> void:
+	name_focused = on
+
+
+func _on_ip_focus(on: bool) -> void:
+	join_focused = on
+
+
+## Drops focus from both net fields without hiding them (they hide
+## themselves next frame if the screen no longer wants them).
+func _release_net_edits() -> void:
+	name_focused = false
+	join_focused = false
+	if name_edit != null and name_edit.has_focus():
+		name_edit.release_focus()
+	if ip_edit != null and ip_edit.has_focus():
+		ip_edit.release_focus()
 
 
 ## QR card docked to the right of the host panel. White backing keeps the
@@ -396,6 +516,18 @@ func _ball_skin_name() -> String:
 	if i >= 0 and i < BALL_FACE_NAMES.size():
 		return str(BALL_FACE_NAMES[i])
 	return "?"
+
+
+## Photo ball skins from res:// (*-modified.png). Loaded once; missing files
+## simply leave that skin empty and the ball falls back to its color ring.
+func _setup_ball_faces() -> void:
+	ball_faces.clear()
+	for p in BALL_FACE_PATHS:
+		if ResourceLoader.exists(p):
+			var tex: Texture2D = load(p)
+			ball_faces.append(tex)
+		else:
+			ball_faces.append(null)
 
 
 func _setup_fonts() -> void:
@@ -639,18 +771,19 @@ func _cycle_custom(i: int) -> void:
 ## stack (including the mobile-controls checkbox) works without a mouse.
 func _menu_tap(pos: Vector2) -> void:
 	if mode == "title":
-		if BTN_START.has_point(pos):
+		if TITLE_PLAY.has_point(pos):
 			_start_game()
-		elif BTN_CUSTOM.has_point(pos):
+		elif TITLE_CUSTOM.has_point(pos):
 			mode = "custom"
-		elif BTN_SETTINGS.has_point(pos):
+		elif TITLE_SETTINGS.has_point(pos):
 			mode = "settings"
-		elif BTN_NET.has_point(pos):
+		elif TITLE_MULTI.has_point(pos):
 			mode = "net"
 			net_screen = "menu"
 			net_status = ""
-			name_focused = true
-			join_focused = false
+			_release_net_edits()
+		elif TITLE_QUIT.has_point(pos):
+			get_tree().quit()
 	elif mode == "custom":
 		_custom_click(pos)
 	elif mode == "settings":
@@ -865,8 +998,7 @@ func _net_leave_quiet() -> void:
 	net_screen = "menu"
 	duel_walls = []
 	net_status = ""
-	join_focused = false
-	name_focused = false
+	_release_net_edits()
 	duel_peer_names.clear()
 	foe_score = 0
 	foe_kills = 0
@@ -927,14 +1059,19 @@ func _roulette_setup(win: int, seed: int) -> void:
 	for i in ROULETTE_CARDS - 2:
 		roulette_strip.append(rng.randi() % n)
 	roulette_strip.append(roulette_win)
+	roulette_stop = roulette_strip.size() - 1
+	# Trail past the winner: the strip stops with maps still ahead of it,
+	# so the landing reads as a random halt instead of the end of a list.
+	for i in ROULETTE_TRAIL:
+		roulette_strip.append(rng.randi() % n)
 
 
 ## Strip offset for the current spin time: fast scroll easing out so the
-## winner lands centered. Deterministic on every peer.
+## winner lands centered with trail cards still ahead. Deterministic.
 func _roulette_offset() -> float:
 	var pr := clampf(1.0 - roulette_t / ROULETTE_T, 0.0, 1.0)
 	var e := 1.0 - pow(1.0 - pr, 3.0)
-	return -float(maxi(roulette_strip.size() - 1, 0)) * ROULETTE_PITCH * e
+	return -float(maxi(roulette_stop, 0)) * ROULETTE_PITCH * e
 
 
 func _roulette_center() -> int:
@@ -1550,25 +1687,25 @@ func _net_click(mp: Vector2) -> void:
 		_net_leave()
 		return
 	if net_screen == "menu":
-		if NET_NAME_RECT.has_point(mp):
-			name_focused = true
-		elif not OS.has_feature("web") and BTN_NET_HOST.has_point(mp):
-			name_focused = false
+		if name_edit != null and NET_NAME_RECT.has_point(mp):
+			name_edit.grab_focus()
+			return
+		if not OS.has_feature("web") and BTN_NET_HOST.has_point(mp):
+			_release_net_edits()
 			_net_host("enet")
 		elif not OS.has_feature("web") and BTN_NET_HOST_WS.has_point(mp):
-			name_focused = false
+			_release_net_edits()
 			_net_host("ws")
 		elif BTN_NET_JOIN.has_point(mp):
-			name_focused = false
-			join_focused = true
+			_release_net_edits()
 			net_screen = "join"
 			if OS.has_feature("web"):
 				net_transport = "ws"
 		else:
 			name_focused = false
 	elif net_screen == "host" and net_mode == "host":
-		if NET_NAME_RECT_SM.has_point(mp):
-			name_focused = true
+		if name_edit != null and NET_NAME_RECT_SM.has_point(mp):
+			name_edit.grab_focus()
 			return
 		for e in net_ip_rects:
 			if (e["rect"] as Rect2).has_point(mp):
@@ -1578,57 +1715,29 @@ func _net_click(mp: Vector2) -> void:
 		if BTN_NET_ROLE.has_point(mp):
 			duel_host_plays = not duel_host_plays
 	elif net_screen == "join":
-		if NET_NAME_RECT.has_point(mp):
-			name_focused = true
-			join_focused = false
-		elif NET_IP_RECT.has_point(mp):
-			join_focused = true
-			name_focused = false
-		else:
-			join_focused = false
-			name_focused = false
-			if not OS.has_feature("web") and BTN_NET_PROTO.has_point(mp):
-				net_transport = "ws" if net_transport == "enet" else "enet"
-			elif BTN_NET_JOIN.has_point(mp):
-				_net_join(join_ip)
+		if name_edit != null and NET_NAME_RECT.has_point(mp):
+			name_edit.grab_focus()
+			return
+		if ip_edit != null and NET_IP_RECT.has_point(mp):
+			ip_edit.grab_focus()
+			return
+		_release_net_edits()
+		if not OS.has_feature("web") and BTN_NET_PROTO.has_point(mp):
+			net_transport = "ws" if net_transport == "enet" else "enet"
+		elif BTN_NET_JOIN.has_point(mp):
+			_net_join(join_ip)
 	elif net_screen == "ready" and net_mode == "host":
-		if NET_NAME_RECT_SM.has_point(mp):
-			name_focused = true
-		elif BTN_NET_ROLE2.has_point(mp):
+		if name_edit != null and NET_NAME_RECT_SM.has_point(mp):
+			name_edit.grab_focus()
+			return
+		if BTN_NET_ROLE2.has_point(mp):
 			duel_host_plays = not duel_host_plays
 		elif BTN_START.has_point(mp):
-			name_focused = false
+			_release_net_edits()
 			_net_roulette_start()
 	elif net_screen == "ready":
-		if NET_NAME_RECT_SM.has_point(mp):
-			name_focused = true
-
-
-func _net_key(code: int) -> void:
-	if name_focused and (net_screen == "menu" or net_screen == "join" or net_screen == "host" or net_screen == "ready"):
-		if code == KEY_BACKSPACE and duel_my_name.length() > 0:
-			duel_my_name = duel_my_name.substr(0, duel_my_name.length() - 1)
-		elif code == KEY_ENTER or code == KEY_KP_ENTER:
-			name_focused = false
-		elif code == KEY_SPACE and duel_my_name.length() < 12:
-			duel_my_name += " "
-		elif code == KEY_MINUS and duel_my_name.length() < 12:
-			duel_my_name += "-"
-		elif ((code >= KEY_A and code <= KEY_Z) or (code >= KEY_0 and code <= KEY_9)) and duel_my_name.length() < 12:
-			duel_my_name += "%c" % code
-		return
-	if net_screen != "join" or not join_focused:
-		return
-	if code >= KEY_0 and code <= KEY_9 and join_ip.length() < 48:
-		join_ip += "%c" % code
-	elif code == KEY_PERIOD and join_ip.length() < 48:
-		join_ip += "."
-	elif (code == KEY_COLON or code == KEY_SEMICOLON) and join_ip.length() < 48:
-		join_ip += ":"
-	elif code == KEY_BACKSPACE and join_ip.length() > 0:
-		join_ip = join_ip.substr(0, join_ip.length() - 1)
-	elif code == KEY_ENTER or code == KEY_KP_ENTER:
-		_net_join(join_ip)
+		if name_edit != null and NET_NAME_RECT_SM.has_point(mp):
+			name_edit.grab_focus()
 
 
 # ------------------------------------------------------------------ input
@@ -1724,19 +1833,21 @@ func _unhandled_input(event: InputEvent) -> void:
 					return
 				_begin_charge()
 			elif mode == "title":
-				if BTN_START.has_point(mb.position):
+				if TITLE_PLAY.has_point(mb.position):
 					_start_game()
-				elif BTN_CUSTOM.has_point(mb.position):
+				elif TITLE_CUSTOM.has_point(mb.position):
 					mode = "custom"
-				elif BTN_SETTINGS.has_point(mb.position):
+				elif TITLE_SETTINGS.has_point(mb.position):
 					mode = "settings"
-				elif BTN_NET.has_point(mb.position):
+				elif TITLE_MULTI.has_point(mb.position):
 					mode = "net"
 					net_screen = "menu"
 					net_status = ""
-					# Land typing-ready: the name box is the only field here.
-					name_focused = true
-					join_focused = false
+					# No autofocus: the player taps the name box, which pops
+					# the mobile keyboard only when actually wanted.
+					_release_net_edits()
+				elif TITLE_QUIT.has_point(mb.position):
+					get_tree().quit()
 			elif mode == "custom":
 				_custom_click(mb.position)
 			elif mode == "settings":
@@ -1750,18 +1861,15 @@ func _unhandled_input(event: InputEvent) -> void:
 			_fire()
 		return
 	var key := event as InputEventKey
-	# Held keys repeat as echo events: let them through while a text field
-	# owns the focus, so holding a letter or backspace keeps typing.
-	# Shortcuts never repeat: echo only passes while typing.
-	var typing := mode == "net" and (name_focused or join_focused)
+	# A focused LineEdit eats its keys first, so shortcuts check focus and
+	# stay out of the way while typing. Shortcuts never repeat on echo.
+	var typing := mode == "net" and ((name_edit != null and name_edit.has_focus()) or (ip_edit != null and ip_edit.has_focus()))
 	if key and key.pressed and (not key.echo or typing):
 		if (net_mode != "off" or mode == "net") and key.pressed:
 			if key.keycode == KEY_ESCAPE:
 				get_tree().quit()
-			# A focused text box eats every key first: otherwise shortcuts
-			# like M (mute) would swallow letters out of the name.
 			elif typing:
-				_net_key(key.keycode)
+				pass
 			elif key.keycode == KEY_M:
 				muted = not muted
 				if muted:
@@ -1777,8 +1885,6 @@ func _unhandled_input(event: InputEvent) -> void:
 					_net_restart_request.rpc_id(1)
 			elif key.keycode == KEY_F and mode == "play":
 				_duel_try_fire(mouse_pos)
-			elif mode == "net":
-				_net_key(key.keycode)
 		return
 		if key.keycode == KEY_R and key.pressed:
 			_start_game()
@@ -2237,6 +2343,14 @@ func _kill_target(idx: int, speed: float) -> void:
 func _physics_process(delta: float) -> void:
 	delta = minf(delta, 1.0 / 30.0)
 	t += delta
+	# Fresh screen, fresh entrance: any mode or versus-screen swap restarts
+	# the menu animation clock. Gameplay never reads it.
+	var key := mode + "|" + net_screen
+	if key != _ui_key:
+		_ui_key = key
+		ui_t = 0.0
+	else:
+		ui_t += delta
 	if shake > 0.0:
 		shake = maxf(0.0, shake - delta * 40.0)
 	hurt_cd = maxf(0.0, hurt_cd - delta)
@@ -2307,6 +2421,7 @@ func _physics_process(delta: float) -> void:
 	_update_ambient(delta)
 	_update_post_fx(delta)
 	_update_camera(delta)
+	_update_net_edits()
 	if touch_aim_id < 0 and not stick_on:
 		mouse_pos = _screen_to_world(get_viewport().get_mouse_position())
 	queue_redraw()
@@ -4730,7 +4845,11 @@ func _draw_custom() -> void:
 	for i in 6:
 		var r := _custom_row_rect(i)
 		var hov := r.has_point(mp)
+		# Rows glide in from the right in list order on every arrival.
+		r.position.x += (1.0 - _ui_ease_at(0.05 + float(i) * 0.05)) * 50.0
 		draw_rect(r, Color(0.10, 0.22, 0.38, 0.60) if hov else Color(0.06, 0.13, 0.24, 0.60))
+		if hov:
+			draw_rect(Rect2(r.position, Vector2(6.0, r.size.y)), WHITE)
 		draw_rect(r, Color(0.42, 0.66, 1.0, 0.35) if hov else Color(0.42, 0.66, 1.0, 0.18), false, 1.0)
 		_text(CUSTOM_LABELS[i], Vector2(r.position.x + 24.0, r.position.y + 32.0), 20, WHITE if hov else DIM)
 		if i == 0:
@@ -4751,7 +4870,8 @@ func _draw_custom() -> void:
 	draw_rect(BTN_BACK, Color(0.10, 0.22, 0.30, 0.90) if hov_b else Color(0.05, 0.14, 0.20, 0.90))
 	draw_rect(BTN_BACK, CYAN if hov_b else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
 	_text_center_at(BTN_BACK.get_center() + Vector2(0.0, 7.0), "BACK", 20, WHITE if hov_b else DIM, bold_font)
-	_text_center_at(Vector2(640.0, 700.0), "click a row to change it   ·   R starts the run", 12, Color(0.45, 0.60, 0.80, 0.55))
+	_draw_menu_bar("click a row to change it   ·   R starts the run")
+	_menu_fade()
 
 
 func _draw_settings() -> void:
@@ -4764,7 +4884,10 @@ func _draw_settings() -> void:
 	var mp := get_viewport().get_mouse_position()
 	var r := _settings_row_rect()
 	var hov := r.has_point(mp)
+	r.position.x += (1.0 - _ui_ease_at(0.05)) * 50.0
 	draw_rect(r, Color(0.10, 0.22, 0.38, 0.60) if hov else Color(0.06, 0.13, 0.24, 0.60))
+	if hov:
+		draw_rect(Rect2(r.position, Vector2(6.0, r.size.y)), WHITE)
 	draw_rect(r, Color(0.42, 0.66, 1.0, 0.35) if hov else Color(0.42, 0.66, 1.0, 0.18), false, 1.0)
 	_text("MOBILE CONTROLS", Vector2(r.position.x + 24.0, r.position.y + 32.0), 20, WHITE if hov else DIM)
 	_text_right("<  " + ("ON" if mobile_controls else "OFF") + "  >", Vector2(r.end.x - 24.0, r.position.y + 32.0), 20, CYAN if mobile_controls else DIM)
@@ -4773,14 +4896,19 @@ func _draw_settings() -> void:
 	draw_rect(BTN_BACK, Color(0.10, 0.22, 0.30, 0.90) if hov_b else Color(0.05, 0.14, 0.20, 0.90))
 	draw_rect(BTN_BACK, CYAN if hov_b else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
 	_text_center_at(BTN_BACK.get_center() + Vector2(0.0, 7.0), "BACK", 20, WHITE if hov_b else DIM, bold_font)
+	_draw_menu_bar("toggles save automatically")
+	_menu_fade()
 
 
 func _net_button(r: Rect2, label: String, mp: Vector2) -> void:
 	var hov := r.has_point(mp)
-	draw_rect(r, Color(0.10, 0.30, 0.38, 0.95) if hov else Color(0.06, 0.18, 0.26, 0.95))
-	draw_rect(r, CYAN if hov else Color(0.42, 0.66, 1.0, 0.70), false, 2.0)
-	var fs := 22 if r.size.x > 200.0 else 18
-	_text_center_at(r.get_center() + Vector2(0.0, 9.0), label, fs, WHITE, bold_font)
+	# Lobby buttons glide up in column order on every arrival.
+	var e := _ui_ease_at(0.05 + clampf((r.position.y - 232.0) / 120.0, 0.0, 3.0) * 0.06)
+	var rr := Rect2(r.position + Vector2(0.0, (1.0 - e) * 30.0), r.size)
+	draw_rect(rr, Color(0.10, 0.30, 0.38, 0.95) if hov else Color(0.06, 0.18, 0.26, 0.95))
+	draw_rect(rr, CYAN if hov else Color(0.42, 0.66, 1.0, 0.70), false, 2.0)
+	var fs := 22 if rr.size.x > 200.0 else 18
+	_text_center_at(rr.get_center() + Vector2(0.0, 9.0), label, fs, WHITE, bold_font)
 
 
 ## Editable display-name field. The YOU placeholder lives inside the box
@@ -4788,6 +4916,8 @@ func _net_button(r: Rect2, label: String, mp: Vector2) -> void:
 ## labels fill in for rivals who skipped theirs. The big box lives on
 ## the menu/join screens; the small bare one on the host/ready screens.
 func _draw_name_field(rect: Rect2) -> void:
+	if name_edit != null and name_edit.visible:
+		return  # the real LineEdit is showing; it draws the box + text itself
 	draw_rect(rect, Color(0.06, 0.13, 0.24, 0.9))
 	draw_rect(rect, CYAN if name_focused else Color(0.42, 0.66, 1.0, 0.5), false, 2.0)
 	var caret := "_" if name_focused and int(t * 2.0) % 2 == 0 else ""
@@ -4803,32 +4933,60 @@ func _draw_name_box() -> void:
 	_draw_name_field(NET_NAME_RECT)
 
 
+## Map roulette gets its own full screen, not the lobby panel: no lobby
+## chrome, no BACK button, nothing host-menu behind it.
+func _draw_roulette(mp: Vector2) -> void:
+	draw_rect(Rect2(0.0, 0.0, 1280.0, 720.0), Color(0.008, 0.012, 0.030, 0.94))
+	_text_center_at(Vector2(640.0, 110.0), "MAP ROULETTE", 40, WHITE, bold_font)
+	var roff := _roulette_offset()
+	var rcen := _roulette_center()
+	for i in roulette_strip.size():
+		var cx := 640.0 + float(i) * ROULETTE_PITCH + roff
+		if cx < -220.0 or cx > 1500.0:
+			continue
+		_roulette_card(Rect2(cx - 150.0, 200.0, 300.0, 280.0), int(roulette_strip[i]), i == rcen)
+	for sx in [-1.0, 1.0]:
+		var bx: float = 640.0 + (sx as float) * 162.0
+		draw_line(Vector2(bx, 190.0), Vector2(bx - sx * 26.0, 190.0), GOLD, 4.0, true)
+		draw_line(Vector2(bx, 490.0), Vector2(bx - sx * 26.0, 490.0), GOLD, 4.0, true)
+	if roulette_t <= 0.0:
+		_text_center_at(Vector2(640.0, 556.0), _duel_map_name(roulette_win), 44, GOLD, bold_font)
+		_text_center_at(Vector2(640.0, 602.0), "GET READY!", 18, DIM)
+	else:
+		_text_center_at(Vector2(640.0, 580.0), "spinning...", 18, DIM)
+	_text_center_at(Vector2(640.0, 700.0), "online versus - last fighter standing wins", 12, Color(0.45, 0.60, 0.80, 0.55))
+
+
 func _draw_net() -> void:
+	var mp := get_viewport().get_mouse_position()
+	if net_screen == "roulette":
+		_draw_roulette(mp)
+		return
 	draw_rect(Rect2(0.0, 0.0, 1280.0, 720.0), Color(0.015, 0.020, 0.045, 0.72))
 	var panel := Rect2(340.0, 140.0, 600.0, 440.0)
 	draw_rect(panel.grow(6.0), Color(0.02, 0.05, 0.10, 0.85))
 	draw_rect(panel, Color(0.03, 0.07, 0.14, 0.92))
 	draw_rect(panel, Color(0.40, 0.72, 1.0, 0.35), false, 2.0)
 	_text_center_at(Vector2(640.0, 196.0), "MULTIPLAYER", 34, WHITE, bold_font)
-	var mp := get_viewport().get_mouse_position()
 	if net_screen == "menu":
 		if OS.has_feature("web"):
 			_text_center_at(Vector2(640.0, 308.0), "HOSTING NEEDS THE DESKTOP BUILD", 18, DIM)
 			_net_button(BTN_NET_JOIN, "JOIN GAME", mp)
-		_draw_name_box()
-		_text_center_at(Vector2(640.0, 470.0), "paste the ws:// address your desktop host copied", 14, DIM)
+			_draw_name_box()
+			_text_center_at(Vector2(640.0, 470.0), "paste the ws:// address your desktop host copied", 14, DIM)
 		else:
 			_net_button(BTN_NET_HOST, "HOST (PC)", mp)
 			_net_button(BTN_NET_HOST_WS, "HOST (WEB)", mp)
 			_net_button(BTN_NET_JOIN, "JOIN GAME", mp)
 			_draw_name_box()
-		_text_center_at(Vector2(640.0, 470.0), "host pc = desktop rivals  ·  host web = browser rivals can join", 14, DIM)
+			_text_center_at(Vector2(640.0, 470.0), "host pc = desktop rivals  ·  host web = browser rivals can join", 14, DIM)
 	elif net_screen == "join":
 		_text_center_at(Vector2(640.0, 250.0), "ENTER WS ADDRESS" if (net_transport == "ws" or OS.has_feature("web")) else "ENTER HOST IP", 18, DIM)
-		draw_rect(NET_IP_RECT, Color(0.06, 0.13, 0.24, 0.9))
-		draw_rect(NET_IP_RECT, CYAN if join_focused else Color(0.42, 0.66, 1.0, 0.5), false, 2.0)
-		var caret := "_" if join_focused and int(t * 2.0) % 2 == 0 else ""
-		_text_center_at(Vector2(640.0, 312.0), join_ip + caret, 24, WHITE, bold_font)
+		if ip_edit == null or not ip_edit.visible:
+			draw_rect(NET_IP_RECT, Color(0.06, 0.13, 0.24, 0.9))
+			draw_rect(NET_IP_RECT, CYAN if join_focused else Color(0.42, 0.66, 1.0, 0.5), false, 2.0)
+			var caret := "_" if join_focused and int(t * 2.0) % 2 == 0 else ""
+			_text_center_at(Vector2(640.0, 312.0), join_ip + caret, 24, WHITE, bold_font)
 		_net_button(BTN_NET_JOIN, "JOIN" if net_transport == "enet" and not OS.has_feature("web") else "JOIN WEB", mp)
 		_draw_name_box()
 		if OS.has_feature("web"):
@@ -4870,65 +5028,114 @@ func _draw_net() -> void:
 			_draw_name_field(NET_NAME_RECT_SM)
 			_text_center_at(Vector2(640.0, 300.0), "RIVAL FOUND", 26, CYAN, bold_font)
 			_text_center_at(Vector2(640.0, 400.0), "waiting for host to start...", 18, DIM)
-	elif net_screen == "roulette":
-		_text_center_at(Vector2(640.0, 110.0), "MAP ROULETTE", 40, WHITE, bold_font)
-		var roff := _roulette_offset()
-		var rcen := _roulette_center()
-		for i in roulette_strip.size():
-			var cx := 640.0 + float(i) * ROULETTE_PITCH + roff
-			if cx < -220.0 or cx > 1500.0:
-				continue
-			_roulette_card(Rect2(cx - 150.0, 200.0, 300.0, 280.0), int(roulette_strip[i]), i == rcen)
-		for sx in [-1.0, 1.0]:
-			var bx: float = 640.0 + (sx as float) * 162.0
-			draw_line(Vector2(bx, 190.0), Vector2(bx - sx * 26.0, 190.0), GOLD, 4.0, true)
-			draw_line(Vector2(bx, 490.0), Vector2(bx - sx * 26.0, 490.0), GOLD, 4.0, true)
-		if roulette_t <= 0.0:
-			_text_center_at(Vector2(640.0, 556.0), _duel_map_name(roulette_win), 44, GOLD, bold_font)
-			_text_center_at(Vector2(640.0, 602.0), "GET READY!", 18, DIM)
-		else:
-			_text_center_at(Vector2(640.0, 580.0), "spinning...", 18, DIM)
 	elif net_screen == "countdown":
 		_text_center_at(Vector2(640.0, 360.0), str(maxi(int(ceil(net_count)), 1)), 96, WHITE, bold_font)
 	_net_button(BTN_BACK, "BACK", mp)
-	_text_center_at(Vector2(640.0, 700.0), "online versus - R restarts after a match", 12, Color(0.45, 0.60, 0.80, 0.55))
+	_draw_menu_bar("online versus - R restarts after a match")
+	_menu_fade()
 
 
+## 0-to-1 ease-out for menu entrances, with a per-element delay so rows
+## and buttons cascade in instead of popping all at once.
+func _ui_ease_at(delay: float, dur: float = 0.35) -> float:
+	var p := clampf((ui_t - delay) / maxf(dur, 0.01), 0.0, 1.0)
+	return 1.0 - pow(1.0 - p, 3.0)
+
+
+## Full-screen fade that lifts as a fresh menu settles in. Called last so
+## every menu shares the same soft landing.
+func _menu_fade() -> void:
+	var a := (1.0 - _ui_ease_at(0.0, 0.30)) * 0.45
+	if a > 0.004:
+		draw_rect(Rect2(0.0, 0.0, 1280.0, 720.0), Color(0.0, 0.0, 0.0, a))
+
+
+## Bottom hint bar shared by the submenus: same slab + divider language
+## as the main menu's control bar.
+func _draw_menu_bar(hint: String) -> void:
+	draw_rect(Rect2(0.0, 672.0, 1280.0, 48.0), Color(0.02, 0.04, 0.08, 0.92))
+	draw_line(Vector2(0.0, 672.0), Vector2(1280.0, 672.0), Color(0.42, 0.66, 1.0, 0.35), 1.5)
+	_text_center_at(Vector2(640.0, 702.0), hint, 12, Color(0.45, 0.60, 0.80, 0.85))
+
+
+## BO3-style front end in game theme: logo + vertical menu down the left,
+## the bouncy ball as the center character, control bar along the bottom.
+## Cartoon read comes from chunky outlines, the gloss shine and the bob.
 func _draw_title() -> void:
 	draw_rect(Rect2(0.0, 0.0, 1280.0, 720.0), Color(0.015, 0.020, 0.045, 0.58))
-
-	_text_center_at(Vector2(640.0, 252.0), "BOUNCE BACK", 88, Color(0.25, 0.80, 1.0, 0.28), bold_font)
-	_text_center_at(Vector2(640.0, 248.0), "BOUNCE BACK", 88, WHITE, bold_font)
-	_text_center_at(Vector2(640.0, 290.0), "hold  ·  charge  ·  ricochet", 18, Color(0.55, 0.85, 1.0, 0.75))
-
-	_rule(350.0, "HOLD", "charge your bounce")
-	_rule(374.0, "RELEASE", "launch toward the cursor")
-	_rule(398.0, "RICOCHET", "touch balls to shatter them")
-	_rule(422.0, "EARN SHOTS", "hit a ball to shoot again")
-	_rule(446.0, "SPIKES", "they hunt you, slow hits kill")
-	_rule(470.0, "EXPLORE", "the world scrolls past the screen")
-	_rule(494.0, "LAVA", "the molten floor ends your run")
-
 	var mp := get_viewport().get_mouse_position()
-	var hov_s := BTN_START.has_point(mp)
-	var hov_c := BTN_CUSTOM.has_point(mp)
-	var hov_st := BTN_SETTINGS.has_point(mp)
-	draw_rect(BTN_START, Color(0.10, 0.30, 0.38, 0.95) if hov_s else Color(0.06, 0.18, 0.26, 0.95))
-	draw_rect(BTN_START, CYAN if hov_s else Color(0.42, 0.66, 1.0, 0.70), false, 2.0)
-	_text_center_at(BTN_START.get_center() + Vector2(0.0, 9.0), "START", 26, WHITE, bold_font)
-	var hov_n := BTN_NET.has_point(mp)
-	draw_rect(BTN_CUSTOM, Color(0.10, 0.22, 0.30, 0.90) if hov_c else Color(0.05, 0.14, 0.20, 0.90))
-	draw_rect(BTN_CUSTOM, CYAN if hov_c else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
-	_text_center_at(BTN_CUSTOM.get_center() + Vector2(0.0, 7.0), "CUSTOMIZE", 16, WHITE if hov_c else DIM, bold_font)
-	draw_rect(BTN_NET, Color(0.10, 0.22, 0.30, 0.90) if hov_n else Color(0.05, 0.14, 0.20, 0.90))
-	draw_rect(BTN_NET, CYAN if hov_n else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
-	_text_center_at(BTN_NET.get_center() + Vector2(0.0, 7.0), "MULTIPLAYER", 16, WHITE if hov_n else DIM, bold_font)
-	draw_rect(BTN_SETTINGS, Color(0.10, 0.22, 0.30, 0.90) if hov_st else Color(0.05, 0.14, 0.20, 0.90))
-	draw_rect(BTN_SETTINGS, CYAN if hov_st else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
-	_text_center_at(BTN_SETTINGS.get_center() + Vector2(0.0, 7.0), "SETTINGS", 16, WHITE if hov_st else DIM, bold_font)
-	if best > 0:
-		_text_center_at(Vector2(640.0, 662.0), "BEST  %d" % best, 16, DIM)
-	_text_center_at(Vector2(640.0, 700.0), "R restart   ·   M mute", 12, Color(0.45, 0.60, 0.80, 0.55))
+	_draw_title_ball()
+	# Logo with a soft cyan ghost behind it for the arcade-cabinet glow.
+	# It drifts up into place and breathes gently once settled.
+	var le := _ui_ease_at(0.0)
+	var ly := (1.0 - le) * -26.0 + sin(t * 1.6) * 3.0
+	var bw := bold_font.get_string_size("BOUNCE  ", HORIZONTAL_ALIGNMENT_LEFT, -1, 68).x
+	_text("BOUNCE  BACK", Vector2(114.0, 294.0 + ly), 68, Color(0.25, 0.80, 1.0, 0.30 * le), true)
+	_text("BOUNCE  ", Vector2(110.0, 290.0 + ly), 68, Color(1.0, 1.0, 1.0, le), true)
+	_text("BACK", Vector2(110.0 + bw, 290.0 + ly), 68, Color(1.0, 0.77, 0.30, le), true)
+	var hov := TITLE_PLAY.has_point(mp) or TITLE_MULTI.has_point(mp) or TITLE_CUSTOM.has_point(mp) or TITLE_SETTINGS.has_point(mp) or TITLE_QUIT.has_point(mp)
+	_title_button(TITLE_PLAY, "PLAY", mp, not hov)
+	_title_button(TITLE_MULTI, "MULTIPLAYER", mp, false)
+	_title_button(TITLE_CUSTOM, "CUSTOMIZE", mp, false)
+	_title_button(TITLE_SETTINGS, "SETTINGS", mp, false)
+	_title_button(TITLE_QUIT, "QUIT", mp, false)
+	# The default PLAY slot breathes until the cursor picks a lane.
+	if not hov:
+		var pulse := 0.5 + 0.5 * sin(t * 3.0)
+		draw_rect(TITLE_PLAY.grow(2.0 + pulse * 2.0), Color(0.25, 0.80, 1.0, 0.18 + 0.22 * pulse), false, 2.0)
+	_text("You are Player One", Vector2(110.0, 634.0), 14, DIM)
+	_text("Lobby Privacy: Open", Vector2(110.0, 654.0), 14, DIM)
+	_draw_title_bar()
+	_menu_fade()
+
+
+## Left-column menu row: dark translucent slab, white accent bar when
+## hovered (or the default PLAY slot when nothing is hovered).
+func _title_button(r: Rect2, label: String, mp: Vector2, selected: bool) -> void:
+	# Buttons sweep in from the left in column order on every arrival.
+	var e := _ui_ease_at(clampf((r.position.y - 330.0) / 50.0, 0.0, 4.0) * 0.06)
+	var rr := Rect2(r.position + Vector2((1.0 - e) * -60.0, 0.0), r.size)
+	var on := selected or r.has_point(mp)
+	draw_rect(rr, Color(0.10, 0.30, 0.38, 0.95) if on else Color(0.05, 0.13, 0.22, 0.78))
+	if on:
+		draw_rect(Rect2(rr.position, Vector2(6.0, rr.size.y)), WHITE)
+	else:
+		draw_rect(Rect2(rr.position, Vector2(3.0, rr.size.y)), Color(0.42, 0.66, 1.0, 0.35))
+	_text(label, rr.position + Vector2(24.0, 33.0), 22, WHITE if on else DIM, true)
+
+
+## The bouncy ball as the center character: current skin (photo faces
+## included), thick cartoon outline, gloss shine, slow orbiting rings.
+func _draw_title_ball() -> void:
+	# The ball drops in from above, then keeps its idle bob.
+	var be := _ui_ease_at(0.0, 0.45)
+	var c := Vector2(830.0, 390.0 + sin(t * 2.0) * 12.0 + (1.0 - be) * 140.0)
+	draw_arc(c, 152.0, t * 0.7, t * 0.7 + PI * 1.2, 32, Color(0.43, 0.90, 1.0, 0.35), 6.0, true)
+	draw_arc(c, 180.0, -t * 0.5, -t * 0.5 + PI * 0.9, 32, Color(1.0, 0.77, 0.30, 0.30), 5.0, true)
+	draw_circle(c, 110.0, Color(0.0, 0.0, 0.0, 0.45))
+	var face := _ball_face_tex()
+	if face != null:
+		draw_texture_rect(face, Rect2(c - Vector2(110.0, 110.0), Vector2(220.0, 220.0)), false)
+	else:
+		draw_circle(c, 110.0, _ball_col())
+	draw_circle(c + Vector2(-38.0, -44.0), 34.0, Color(1.0, 1.0, 1.0, 0.75))
+	draw_circle(c + Vector2(30.0, 44.0), 12.0, Color(1.0, 1.0, 1.0, 0.45))
+	draw_arc(c, 110.0, 0.0, TAU, 64, Color(1.0, 1.0, 1.0, 0.9), 6.0, true)
+
+
+## Bottom control bar: quit hint, best score + how-to, mute state.
+func _draw_title_bar() -> void:
+	var bar := Rect2(0.0, 672.0, 1280.0, 48.0)
+	draw_rect(bar, Color(0.02, 0.04, 0.08, 0.92))
+	draw_line(Vector2(0.0, 672.0), Vector2(1280.0, 672.0), Color(0.42, 0.66, 1.0, 0.35), 1.5)
+	draw_rect(Rect2(24.0, 682.0, 44.0, 28.0), Color(0.05, 0.12, 0.20, 0.95))
+	_text("ESC", Vector2(30.0, 703.0), 15, WHITE, true)
+	_text("Quit", Vector2(76.0, 703.0), 15, DIM)
+	var mid := "BEST  %d" % best if best > 0 else "hold to charge  ·  release to launch  ·  shatter balls"
+	_text_center_at(Vector2(640.0, 702.0), mid, 14, DIM)
+	draw_rect(Rect2(1150.0, 682.0, 30.0, 28.0), Color(0.05, 0.12, 0.20, 0.95))
+	_text("M", Vector2(1158.0, 703.0), 15, WHITE, true)
+	_text("Mute" if muted else "Sound", Vector2(1186.0, 703.0), 15, DIM)
 
 
 func _draw_game_over() -> void:

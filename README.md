@@ -53,7 +53,11 @@ touches burn)
 to copy it for the rival (each address shows its adapter, best first -
 skip VPN/virtual ones). Both PCs must be on the same network, and the host
 must allow the game through the Windows firewall (UDP port 7777).
-If joining hangs, it fails after ~12s. Mid-match the netcode favors staying
+If joining hangs, it fails after ~12s. Browser players can join too:
+the desktop host picks HOST (WEB), clicks the `ws://...` address to
+copy it, and the browser rival pastes it on the JOIN screen (browsers
+cannot host, and `ws://` needs an `http://` page — `https://` pages
+need `wss://` instead). Mid-match the netcode favors staying
 in: snapshots are small (fighters + packed bullets 20 Hz, balls 10 Hz,
 ~550 Kbps) and ENet waits out long WiFi hiccups before dropping anyone.
 Green drifters also ship their velocity, so joiners glide them locally
