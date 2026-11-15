@@ -1126,35 +1126,58 @@ func _net_join(ip: String) -> void:
 	var low := join_ip.to_lower()
 	var want_ws := net_transport == "ws" or OS.has_feature("web")
 	var scheme := "ws"
+	var had_ws_scheme := false
 	var rest := join_ip
 	if low.begins_with("ws://"):
 		want_ws = true
+		had_ws_scheme = true
 		rest = join_ip.substr(5)
 	elif low.begins_with("wss://"):
 		want_ws = true
 		scheme = "wss"
+		had_ws_scheme = true
 		rest = join_ip.substr(6)
 	if want_ws:
 		net_transport = "ws"
 		var path := ""
-		var slash := rest.find("/")
+		var cut := rest.length()
+		for sep in ["/", "?", "#"]:
+			var i := rest.find(sep)
+			if i >= 0:
+				cut = mini(cut, i)
 		var hostport := rest
-		if slash >= 0:
-			hostport = rest.substr(0, slash)
-			path = rest.substr(slash)
+		if cut < rest.length():
+			hostport = rest.substr(0, cut)
+			path = rest.substr(cut)
 		var whost := hostport
 		var wport := NET_PORT
+		var has_explicit_wport := false
+		if hostport.begins_with("["):
+			var close := hostport.find("]")
+			if close > 0:
+				var tail := hostport.substr(close + 1)
+				if tail.begins_with(":"):
+					var wmaybe6 := tail.substr(1)
+					whost = hostport.substr(0, close + 1)
+					if wmaybe6.is_valid_int():
+						wport = clampi(wmaybe6.to_int(), 1, 65535)
+						has_explicit_wport = true
 		if hostport.count(":") == 1:
 			var wcut := hostport.rfind(":")
 			var wmaybe := hostport.substr(wcut + 1)
-			if wmaybe == "" or wmaybe.is_valid_int():
+			if wmaybe.is_valid_int():
 				whost = hostport.substr(0, wcut)
-				if wmaybe != "":
-					wport = clampi(wmaybe.to_int(), 1, 65535)
+				wport = clampi(wmaybe.to_int(), 1, 65535)
+				has_explicit_wport = true
 		if whost.strip_edges() == "":
 			net_status = "ENTER AN IP FIRST"
 			return
-		var url := "%s://%s:%d%s" % [scheme, whost.strip_edges(), wport, path]
+		var authority := whost.strip_edges()
+		# Keep explicit ports exactly as entered. For full ws:// or wss:// URLs,
+		# preserve the scheme's default port unless one was given.
+		if has_explicit_wport or not had_ws_scheme:
+			authority = "%s:%d" % [authority, wport]
+		var url := "%s://%s%s" % [scheme, authority, path]
 		var wpeer := WebSocketMultiplayerPeer.new()
 		if wpeer.create_client(url) != OK:
 			net_status = "JOIN FAILED"
@@ -1874,7 +1897,10 @@ func _on_net_connection_failed() -> void:
 	multiplayer.multiplayer_peer = null
 	net_mode = "off"
 	net_timeout = 0.0
-	net_status = "CONNECTION FAILED - CHECK IP & FIREWALL"
+	if OS.has_feature("web") and net_transport == "ws":
+		net_status = "CONNECTION FAILED - USE http:// PAGE FOR ws:// LINKS"
+	else:
+		net_status = "CONNECTION FAILED - CHECK IP & FIREWALL"
 
 
 func _on_net_server_disconnected() -> void:
