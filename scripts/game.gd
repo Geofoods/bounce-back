@@ -287,6 +287,8 @@ var duel_my_name := ""    # my versus display name; blank falls back to YOU/FOE 
 var name_focused := false  # typing into the name box (multiplayer menu/join screens)
 var name_edit: LineEdit  # real name field floating over the drawn lobby panels
 var ip_edit: LineEdit  # real address field floating over the drawn join panel
+var _ensure_name_edit := false
+var _ensure_ip_edit := false
 var duel_peer_names := {}  # host-side: peer id -> cleaned name sent via _net_hello
 var net_ip_rects: Array = []  # clickable host-screen address lines ({rect, text})
 var net_copied_at := -99.0    # t when an address was last copied to the clipboard
@@ -411,12 +413,10 @@ func _setup_net_edits() -> void:
 	name_edit.max_length = 12
 	name_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
 	name_edit.context_menu_enabled = true
-	name_edit.keyboard_visibility_changed.connect(_on_name_editable)
 	name_edit.add_theme_font_override("font", bold_font)
 	name_edit.add_theme_color_override("font_color", WHITE)
 	name_edit.add_theme_color_override("font_placeholder_color", DIM)
 	name_edit.add_theme_color_override("caret_color", CYAN)
-	name_edit.node_filter_input = false
 	_net_edit_boxes(name_edit)
 	name_edit.text_changed.connect(_on_name_changed)
 	name_edit.text_submitted.connect(_on_name_submitted)
@@ -429,12 +429,10 @@ func _setup_net_edits() -> void:
 	ip_edit.max_length = 64
 	ip_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
 	ip_edit.context_menu_enabled = true
-	ip_edit.keyboard_visibility_changed.connect(_on_ip_editable)
 	ip_edit.add_theme_font_override("font", bold_font)
 	ip_edit.add_theme_color_override("font_color", WHITE)
 	ip_edit.add_theme_color_override("font_placeholder_color", DIM)
 	ip_edit.add_theme_color_override("caret_color", CYAN)
-	ip_edit.node_filter_input = false
 	_net_edit_boxes(ip_edit)
 	ip_edit.text_changed.connect(_on_ip_changed)
 	ip_edit.text_submitted.connect(_on_ip_submitted)
@@ -442,6 +440,9 @@ func _setup_net_edits() -> void:
 	ip_edit.focus_exited.connect(_on_ip_focus.bind(false))
 	ip_edit.visible = false
 	add_child(ip_edit)
+	_ensure_name_edit = on_mobile
+	_ensure_ip_edit = on_mobile
+	# Keyboard is requested by the focused LineEdit via grab_focus(); nothing to force here.
 
 
 ## Dark lobby styling for a net LineEdit: dim border idle, cyan on focus.
@@ -474,9 +475,11 @@ func _update_net_edits() -> void:
 			name_edit.add_theme_font_size_override("font_size", 17 if rect == NET_NAME_RECT_SM else 22)
 			if not name_edit.has_focus() and name_edit.text != duel_my_name:
 				name_edit.text = duel_my_name
-			name_edit.editable = true
-		elif name_edit.has_focus():
-			name_edit.release_focus()
+			if _ensure_name_edit:
+				name_edit.editable = true
+			if _ensure_name_edit:
+				if not name_edit.has_focus():
+					name_edit.grab_focus()
 	if ip_edit != null:
 		ip_edit.visible = want_ip
 		if want_ip:
@@ -485,9 +488,11 @@ func _update_net_edits() -> void:
 			ip_edit.add_theme_font_size_override("font_size", 24)
 			if not ip_edit.has_focus() and ip_edit.text != join_ip:
 				ip_edit.text = join_ip
-			ip_edit.editable = true
-		elif ip_edit.has_focus():
-			ip_edit.release_focus()
+			if _ensure_ip_edit:
+				ip_edit.editable = true
+			if _ensure_ip_edit:
+				if not ip_edit.has_focus():
+					ip_edit.grab_focus()
 
 
 func _on_name_changed(new_text: String) -> void:
@@ -516,16 +521,6 @@ func _on_name_focus(on: bool) -> void:
 
 func _on_ip_focus(on: bool) -> void:
 	join_focused = on
-
-
-func _on_name_editable(visible: bool) -> void:
-	if name_edit != null:
-		name_edit.editable = true
-
-
-func _on_ip_editable(visible: bool) -> void:
-	if ip_edit != null:
-		ip_edit.editable = true
 
 
 ## Drops focus from both net fields without hiding them (they hide
