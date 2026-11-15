@@ -229,6 +229,8 @@ var foe_score := 0
 var foe_kills := 0
 var join_ip := "127.0.0.1"
 var join_focused := false
+var net_ip_rects: Array = []  # clickable host-screen address lines ({rect, text})
+var net_copied_at := -99.0    # t when an address was last copied to the clipboard
 
 # duel (versus shooter): host-authoritative shared arena, 100 HP each.
 const DUEL_TIME := 60.0
@@ -543,14 +545,56 @@ func _connect_net_signals() -> void:
 		multiplayer.server_disconnected.connect(_on_net_server_disconnected)
 
 
-func _net_host_ips() -> Array:
+## Host addresses with adapter names: [{copy, label}]. Virtual, VPN and
+## pseudo adapters sort last so the first address is one a rival can reach.
+func _net_host_addrs() -> Array:
+	var cands: Array = []
+	var order := 0
+	if IP.has_method("get_local_interfaces"):
+		for f in IP.get_local_interfaces():
+			if not (f is Dictionary):
+				continue
+			var nm := str((f as Dictionary).get("friendly", (f as Dictionary).get("name", "")))
+			var low := nm.to_lower()
+			var bad := false
+			for k in ["virtual", "vbox", "vmware", "vmnet", "docker", "wsl", "vethernet", "hyper-v", "vpn", "hamachi", "zerotier", "tailscale", "wireguard", "nordlynx", "tap-", "tun", "loopback", "pseudo", "bluetooth", "isatap", "teredo", "wan miniport", "direct", "ppp", "tunnel"]:
+				if low.contains(k):
+					bad = true
+					break
+			for a in (f as Dictionary).get("addresses", []):
+				var s := str(a)
+				if not s.contains(".") or s.contains(":") or s.begins_with("127."):
+					continue
+				var rank := 3 if bad else (2 if s.begins_with("169.254.") else (0 if _net_is_private(s) else 1))
+				cands.append({"ip": s, "label": nm, "rank": rank, "order": order})
+				order += 1
+	if cands.is_empty():
+		for a in IP.get_local_addresses():
+			var s := str(a)
+			if s.contains(".") and not s.contains(":") and not s.begins_with("127."):
+				cands.append({"ip": s, "label": "", "rank": 0, "order": order})
+			order += 1
 	var out: Array = []
-	for a in IP.get_local_addresses():
-		if a.contains(".") and not a.begins_with("127."):
-			out.append(a)
+	var seen := {}
+	for r in 4:
+		for c in cands:
+			if int((c as Dictionary)["rank"]) != r or seen.has(str((c as Dictionary)["ip"])):
+				continue
+			seen[str((c as Dictionary)["ip"])] = true
+			out.append({"copy": "%s:%d" % [str((c as Dictionary)["ip"]), NET_PORT], "label": str((c as Dictionary)["label"])})
 	if out.is_empty():
-		out.append("127.0.0.1")
+		out.append({"copy": "127.0.0.1:%d" % NET_PORT, "label": ""})
 	return out
+
+
+func _net_is_private(s: String) -> bool:
+	if s.begins_with("10.") or s.begins_with("192.168."):
+		return true
+	if s.begins_with("172."):
+		var tail := s.get_slice(".", 1)
+		if tail.is_valid_int() and int(tail) >= 16 and int(tail) <= 31:
+			return true
+	return false
 
 
 func _net_host() -> void:
@@ -940,6 +984,11 @@ func _net_click(mp: Vector2) -> void:
 		elif BTN_NET_JOIN.has_point(mp):
 			net_screen = "join"
 	elif net_screen == "host" and net_mode == "host":
+		for e in net_ip_rects:
+			if (e["rect"] as Rect2).has_point(mp):
+				DisplayServer.clipboard_set(str(e.get("copy", e.get("text", ""))))
+				net_copied_at = t
+				return
 		if BTN_NET_ROLE.has_point(mp):
 			duel_host_plays = not duel_host_plays
 	elif net_screen == "join":
@@ -3587,14 +3636,23 @@ func _draw_net() -> void:
 		if net_status != "":
 			_text_center_at(Vector2(640.0, 460.0), net_status, 16, RED)
 	elif net_screen == "host":
-		_text_center_at(Vector2(640.0, 260.0), "HOSTING ON - GIVE YOUR RIVAL ONE OF THESE", 16, DIM)
-		var ips := _net_host_ips()
+		_text_center_at(Vector2(640.0, 260.0), "HOSTING ON - CLICK AN ADDRESS TO COPY IT", 16, DIM)
+		var ips := _net_host_addrs()
+		net_ip_rects.clear()
 		for i in mini(ips.size(), 4):
 			var big := i == 0
-			_text_center_at(Vector2(640.0, 306.0 + i * 34.0), "%s:%d" % [str(ips[i]), NET_PORT], 26 if big else 19, WHITE if big else DIM, bold_font)
+			var entry: Dictionary = ips[i]
+			var line := str(entry["copy"])
+			var shown := line if str(entry["label"]) == "" else "%s  (%s)" % [line, str(entry["label"])]
+			var yp := 306.0 + i * 34.0
+			_text_center_at(Vector2(640.0, yp), shown, 26 if big else 19, WHITE if big else DIM, bold_font)
+			net_ip_rects.append({"rect": Rect2(640.0 - 220.0, yp - 16.0, 440.0, 32.0), "text": shown, "copy": line})
+		if t - net_copied_at < 1.5:
+			_text_center_at(Vector2(640.0, 330.0 + maxi(0, mini(ips.size(), 4) - 1) * 34.0), "COPIED!", 16, Color(0.5, 1.0, 0.6))
 		var rivals := multiplayer.get_peers().size()
 		var cap := DUEL_MAX_PLAYERS if not duel_host_plays else DUEL_MAX_PLAYERS - 1
 		_text_center_at(Vector2(640.0, 320.0 + mini(ips.size(), 4) * 34.0), "waiting for rivals... (%d/%d)" % [rivals, cap], 18, Color(0.85, 0.97, 1.0, 0.5 + 0.5 * sin(t * 4.0)))
+		_text_center_at(Vector2(640.0, 350.0 + mini(ips.size(), 4) * 34.0), "RIVAL STUCK ON CONNECTING? ALLOW UDP 7777 IN WINDOWS FIREWALL", 13, DIM)
 		_net_button(BTN_NET_ROLE, "HOST FIGHTS" if duel_host_plays else "HOST SPECTATES", mp)
 	elif net_screen == "ready":
 		if net_mode == "host":

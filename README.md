@@ -45,9 +45,11 @@ with the HOST FIGHTS / HOST SPECTATES toggle in the lobby. Edge arrows point
 at off-screen rivals. Pink/green balls also spawn — smashing one
 reloads your launch (gold spiky balls need a fast hit — slow
 touches burn)
-(one bounce per ball smashed). If joining hangs, it fails after ~12s: use an address from the host's
-list that shares your LAN, and allow the game through the Windows firewall
-(UDP port 7777).
+(one bounce per ball smashed). The host just clicks an address in their list
+to copy it for the rival (each address shows its adapter, best first -
+skip VPN/virtual ones). Both PCs must be on the same network, and the host
+must allow the game through the Windows firewall (UDP port 7777).
+If joining hangs, it fails after ~12s.
 
 ## How it plays
 
