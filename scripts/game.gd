@@ -1,5 +1,5 @@
 extends Node2D
-## BOUNCE BACK — hold to charge, release to launch the ball toward the cursor.
+## BALLS OF DUTY — hold to charge, release to launch the ball toward the cursor.
 ## Fast impacts shatter balls, slow ones bounce off. The camera follows the ball
 ## and leans toward the cursor, through a world several screens wide. Gravity pulls the ball down, and the
 ## molten floor along the bottom of the world ends the run on contact.
@@ -93,7 +93,12 @@ const BALL_NAMES := ["CYAN", "PINK", "GOLD", "GREEN", "PURPLE"]
 const BALL_FACE_PATHS := ["res://images (2)-modified.png", "res://Kai_Cenat-modified.png", "res://LacyHimself-modified.png", "res://Rayasianboy_2025-modified.png", "res://OIP (17)-modified.png"]
 const BALL_FACE_NAMES := ["MARLON", "KAI", "LACY", "RAY", "RAKAI"]
 const HOST_QR_PATH := "res://bing_generated_qrcode.png"
-const CUSTOM_LABELS := ["BALL", "TRAIL", "SHAKE", "GLOW", "SOUND", "MOBILE"]
+const CUSTOM_LABELS := ["BALL", "MOBILE"]
+const SETTINGS_LABELS := ["MOBILE CONTROLS", "TRAIL", "SHAKE", "GLOW", "SOUND"]
+const CUSTOM_ARROW_L := Rect2(372.0, 310.0, 60.0, 60.0)
+const CUSTOM_ARROW_R := Rect2(848.0, 310.0, 60.0, 60.0)
+const CUSTOM_GHOST_L := Rect2(448.0, 288.0, 104.0, 104.0)
+const CUSTOM_GHOST_R := Rect2(728.0, 288.0, 104.0, 104.0)
 const BTN_START := Rect2(490.0, 532.0, 300.0, 56.0)
 const BTN_CUSTOM := Rect2(413.0, 596.0, 146.0, 40.0)
 const BTN_SETTINGS := Rect2(721.0, 596.0, 146.0, 40.0)
@@ -222,6 +227,7 @@ var trail: Array = []
 
 var ball_faces: Array = []
 var duel_gun_texs: Array = []
+var title_last := 0  # last-hovered title button; keeps its highlight off-hover
 var host_qr_tex: Texture2D
 
 var charging: bool = false
@@ -517,19 +523,11 @@ func _ball_face_index() -> int:
 
 
 func _ball_face_tex() -> Texture2D:
-	var i := _ball_face_index()
-	if i < 0 or i >= ball_faces.size():
-		return null
-	return ball_faces[i] as Texture2D
+	return _skin_face_tex(ball_idx)
 
 
 func _ball_skin_name() -> String:
-	if ball_idx < BALL_SKINS.size():
-		return str(BALL_NAMES[clampi(ball_idx, 0, BALL_NAMES.size() - 1)])
-	var i := _ball_face_index()
-	if i >= 0 and i < BALL_FACE_NAMES.size():
-		return str(BALL_FACE_NAMES[i])
-	return "?"
+	return _skin_name(ball_idx)
 
 
 ## Photo ball skins from res:// (*-modified.png). Loaded once; missing files
@@ -569,6 +567,28 @@ func _draw_gun_icon(gun: int, center: Vector2, size: float) -> void:
 		return
 	var sc := size / maxf(s.x, s.y)
 	draw_texture_rect(tex, Rect2(center - s * sc * 0.5, s * sc), false)
+
+
+## Held gun: orbits its carrier, pointing along the aim with a 45-degree
+## counterclockwise offset. The sprite rides at orbit radius and rotates
+## with it, so it visibly revolves around the ball as aim moves.
+func _draw_gun_orbit(gun: int, carrier: Vector2, aim_pos: Vector2, size: float) -> void:
+	if gun <= 0 or gun >= duel_gun_texs.size():
+		return
+	var tex: Texture2D = duel_gun_texs[gun]
+	if tex == null:
+		return
+	var s := tex.get_size()
+	if s.x <= 0.0 or s.y <= 0.0:
+		return
+	var d := aim_pos - carrier
+	var ang := d.angle() if d.length_squared() > 1.0 else 0.0
+	ang -= PI / 4.0
+	var center := carrier + Vector2.RIGHT.rotated(ang) * (BALL_R + 38.0)
+	var sc := size / maxf(s.x, s.y)
+	draw_set_transform(center, ang, Vector2(sc, sc))
+	draw_texture(tex, -s * 0.5)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func _setup_fonts() -> void:
@@ -762,10 +782,38 @@ func _save_custom() -> void:
 	cfg.save("user://bounce_back.cfg")
 
 
-func _ball_col() -> Color:
-	if _ball_face_index() >= 0:
+## Skin helpers by index, so the customize carousel can preview neighbours.
+func _skin_face_tex(idx: int) -> Texture2D:
+	var i := idx - BALL_SKINS.size()
+	if i < 0 or i >= ball_faces.size():
+		return null
+	return ball_faces[i] as Texture2D
+
+
+func _skin_col(idx: int) -> Color:
+	if idx - BALL_SKINS.size() >= 0:
 		return WHITE
-	return BALL_SKINS[clampi(ball_idx, 0, BALL_SKINS.size() - 1)]
+	return BALL_SKINS[clampi(idx, 0, BALL_SKINS.size() - 1)]
+
+
+func _skin_name(idx: int) -> String:
+	if idx < BALL_SKINS.size():
+		return str(BALL_NAMES[clampi(idx, 0, BALL_NAMES.size() - 1)])
+	var i := idx - BALL_SKINS.size()
+	if i >= 0 and i < BALL_FACE_NAMES.size():
+		return str(BALL_FACE_NAMES[i])
+	return "?"
+
+
+func _cycle_ball(dir: int) -> void:
+	var n := _ball_total_skins()
+	ball_idx = (ball_idx + dir + n) % n
+	_save_custom()
+	_sfx("bounce", 0.0, -18.0)
+
+
+func _ball_col() -> Color:
+	return _skin_col(ball_idx)
 
 
 func _ball_hot() -> Color:
@@ -773,22 +821,9 @@ func _ball_hot() -> Color:
 	return Color(minf(c.r * 1.6 + 0.15, 2.2), minf(c.g * 1.6 + 0.15, 2.2), minf(c.b * 1.6 + 0.15, 2.2))
 
 
-func _custom_row_rect(i: int) -> Rect2:
-	return Rect2(380.0, 206.0 + float(i) * 60.0, 520.0, 48.0)
-
-
 func _custom_on(i: int) -> bool:
-	match i:
-		1:
-			return trail_opt
-		2:
-			return shake_opt
-		3:
-			return glow_opt
-		4:
-			return not muted
-		5:
-			return mobile_controls
+	if i == 1:
+		return mobile_controls
 	return true
 
 
@@ -797,24 +832,12 @@ func _custom_value(i: int) -> String:
 
 
 func _cycle_custom(i: int) -> void:
-	match i:
-		0:
-			ball_idx = (ball_idx + 1) % _ball_total_skins()
-		1:
-			trail_opt = not trail_opt
-		2:
-			shake_opt = not shake_opt
-		3:
-			glow_opt = not glow_opt
-		4:
-			muted = not muted
-			if muted:
-				for p in players:
-					p.stop()
-		5:
-			mobile_controls = not mobile_controls
-	_save_custom()
-	_sfx("bounce", 0.0, -18.0)
+	if i == 0:
+		_cycle_ball(1)
+	elif i == 1:
+		mobile_controls = not mobile_controls
+		_save_custom()
+		_sfx("bounce", 0.0, -18.0)
 
 
 ## Touch tap in a menu: same button as a mouse click, so the whole menu
@@ -845,31 +868,74 @@ func _menu_tap(pos: Vector2) -> void:
 			_start_game()
 
 
+func _custom_mobile_rect() -> Rect2:
+	return Rect2(380.0, 470.0, 520.0, 48.0)
+
+
 func _custom_click(mp: Vector2) -> void:
 	if BTN_BACK.has_point(mp):
 		mode = "title"
 		return
-	for i in 6:
-		if _custom_row_rect(i).has_point(mp):
-			_cycle_custom(i)
-			return
+	if CUSTOM_ARROW_L.has_point(mp) or CUSTOM_GHOST_L.has_point(mp):
+		_cycle_ball(-1)
+		return
+	if CUSTOM_ARROW_R.has_point(mp) or CUSTOM_GHOST_R.has_point(mp):
+		_cycle_ball(1)
+		return
+	if _custom_mobile_rect().has_point(mp):
+		_cycle_custom(1)
+		return
 
 
-## Settings screen: main-menu button that opens its own screen. Holds the
-## MOBILE CONTROLS checkbox (shared with the CUSTOMIZE row), so touch and
-## mouse users alike find it from the main menu.
-func _settings_row_rect() -> Rect2:
-	return Rect2(380.0, 260.0, 520.0, 48.0)
+## Settings screen: main-menu button that opens its own screen. Owns every
+## toggle (mobile controls, trail, shake, glow, sound); CUSTOMIZE only
+## picks the skin. Touch and mouse users alike find it from the main menu.
+func _settings_row_rect(i: int) -> Rect2:
+	return Rect2(380.0, 230.0 + float(i) * 60.0, 520.0, 48.0)
+
+
+func _settings_on(i: int) -> bool:
+	match i:
+		0:
+			return mobile_controls
+		1:
+			return trail_opt
+		2:
+			return shake_opt
+		3:
+			return glow_opt
+		4:
+			return not muted
+	return true
+
+
+func _settings_toggle(i: int) -> void:
+	match i:
+		0:
+			mobile_controls = not mobile_controls
+		1:
+			trail_opt = not trail_opt
+		2:
+			shake_opt = not shake_opt
+		3:
+			glow_opt = not glow_opt
+		4:
+			muted = not muted
+			if muted:
+				for p in players:
+					p.stop()
+	_save_custom()
+	_sfx("bounce", 0.0, -18.0)
 
 
 func _settings_click(mp: Vector2) -> void:
 	if BTN_BACK.has_point(mp):
 		mode = "title"
 		return
-	if _settings_row_rect().has_point(mp):
-		mobile_controls = not mobile_controls
-		_save_custom()
-		_sfx("bounce", 0.0, -18.0)
+	for i in SETTINGS_LABELS.size():
+		if _settings_row_rect(i).has_point(mp):
+			_settings_toggle(i)
+			return
 
 
 func _connect_net_signals() -> void:
@@ -1936,6 +2002,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					_net_restart_request.rpc_id(1)
 			elif key.keycode == KEY_F and mode == "play":
 				_duel_try_fire(mouse_pos)
+		if mode == "custom":
+			if key.keycode == KEY_LEFT:
+				_cycle_ball(-1)
+			elif key.keycode == KEY_RIGHT:
+				_cycle_ball(1)
 		return
 		if key.keycode == KEY_R and key.pressed:
 			_start_game()
@@ -4652,9 +4723,15 @@ func _draw_ball() -> void:
 
 	if mode == "play" and shot_ready:
 		draw_arc(ball_pos, BALL_R + 12.0, 0.0, TAU, 40, Color(_ball_col().r, _ball_col().g, _ball_col().b, 0.32), 2.0, true)
-	# Versus: my equipped gun rides above the ball as a floating badge.
+	# Versus: my equipped gun orbits the ball, tracking the cursor (or the
+	# gun stick while it is deflected).
 	if net_mode != "off" and mode == "play" and int(duel_me.get("gun", 0)) > 0:
-		_draw_gun_icon(int(duel_me.get("gun", 0)), ball_pos + Vector2(0.0, -BALL_R - 22.0), 22.0)
+		var aim := mouse_pos
+		if stick_on:
+			var sdir := _stick_dir()
+			if sdir.length() > 0.1:
+				aim = ball_pos + sdir * 200.0
+		_draw_gun_orbit(int(duel_me.get("gun", 0)), ball_pos, aim, 66.0)
 
 	if charging:
 		var c := clampf(charge_t / CHARGE_TIME, 0.0, 1.0)
@@ -4894,7 +4971,8 @@ func _draw_duel_world() -> void:
 			_text_center_at(fp + Vector2(0.0, -40.0), _duel_foe_name(o), 11,
 				Color(minf(col.r + 0.2, 1.0), minf(col.g + 0.1, 1.0), col.b, 0.9))
 			if int(f.get("gun", 0)) > 0:
-				_draw_gun_icon(int(f.get("gun", 0)), fp + Vector2(0.0, -58.0), 20.0)
+				var fv: Vector2 = f.get("vel", Vector2.RIGHT)
+				_draw_gun_orbit(int(f.get("gun", 0)), fp, fp + fv, 60.0)
 
 
 ## Edge arrows pointing at living rivals who are off-screen. Screen space:
@@ -5002,36 +5080,65 @@ func _draw_custom() -> void:
 	draw_rect(panel, Color(0.40, 0.72, 1.0, 0.35), false, 2.0)
 	_text_center_at(Vector2(640.0, 196.0), "CUSTOMIZE", 34, WHITE, bold_font)
 	var mp := get_viewport().get_mouse_position()
-	for i in 6:
-		var r := _custom_row_rect(i)
-		var hov := r.has_point(mp)
-		# Rows glide in from the right in list order on every arrival.
-		r.position.x += (1.0 - _ui_ease_at(0.05 + float(i) * 0.05)) * 50.0
-		draw_rect(r, Color(0.10, 0.22, 0.38, 0.60) if hov else Color(0.06, 0.13, 0.24, 0.60))
-		if hov:
-			draw_rect(Rect2(r.position, Vector2(6.0, r.size.y)), WHITE)
-		draw_rect(r, Color(0.42, 0.66, 1.0, 0.35) if hov else Color(0.42, 0.66, 1.0, 0.18), false, 1.0)
-		_text(CUSTOM_LABELS[i], Vector2(r.position.x + 24.0, r.position.y + 32.0), 20, WHITE if hov else DIM)
-		if i == 0:
-			var face_prev := _ball_face_tex()
-			var skin: Color = _ball_col()
-			if face_prev != null:
-				var c := Vector2(640.0, r.position.y + 24.0)
-				draw_circle(c, 14.0, Color(0.0, 0.0, 0.0, 0.55))
-				draw_texture_rect(face_prev, Rect2(c - Vector2(14.0, 14.0), Vector2(28.0, 28.0)), false)
-				draw_arc(c, 14.0, 0.0, TAU, 24, Color(1.0, 1.0, 1.0, 0.85), 1.5, true)
-			else:
-				draw_circle(Vector2(640.0, r.position.y + 24.0), 14.0, skin)
-				draw_circle(Vector2(640.0, r.position.y + 24.0), 6.0, WHITE)
-			_text_right("<  " + _ball_skin_name() + "  >", Vector2(r.end.x - 24.0, r.position.y + 32.0), 20, skin)
-		else:
-			_text_right("<  " + _custom_value(i) + "  >", Vector2(r.end.x - 24.0, r.position.y + 32.0), 20, CYAN if _custom_on(i) else DIM)
+	_draw_custom_stage(mp)
+	var r := _custom_mobile_rect()
+	var hov := r.has_point(mp)
+	draw_rect(r, Color(0.10, 0.22, 0.38, 0.60) if hov else Color(0.06, 0.13, 0.24, 0.60))
+	if hov:
+		draw_rect(Rect2(r.position, Vector2(6.0, r.size.y)), WHITE)
+	draw_rect(r, Color(0.42, 0.66, 1.0, 0.35) if hov else Color(0.42, 0.66, 1.0, 0.18), false, 1.0)
+	_text(CUSTOM_LABELS[1], Vector2(r.position.x + 24.0, r.position.y + 32.0), 20, WHITE if hov else DIM)
+	_text_right("<  " + _custom_value(1) + "  >", Vector2(r.end.x - 24.0, r.position.y + 32.0), 20, CYAN if _custom_on(1) else DIM)
 	var hov_b := BTN_BACK.has_point(mp)
 	draw_rect(BTN_BACK, Color(0.10, 0.22, 0.30, 0.90) if hov_b else Color(0.05, 0.14, 0.20, 0.90))
 	draw_rect(BTN_BACK, CYAN if hov_b else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
 	_text_center_at(BTN_BACK.get_center() + Vector2(0.0, 7.0), "BACK", 20, WHITE if hov_b else DIM, bold_font)
-	_draw_menu_bar("click a row to change it   ·   R starts the run")
+	_draw_menu_bar("arrows, side skins or LEFT / RIGHT change skin   ·   click MOBILE to toggle")
 	_menu_fade()
+
+
+## Skin carousel: the selected skin stages center, neighbours ghost left
+## and right. Arrow buttons, the ghosts and the arrow keys all cycle.
+func _draw_custom_stage(mp: Vector2) -> void:
+	var n := _ball_total_skins()
+	var prev := (ball_idx - 1 + n) % n
+	var nxt := (ball_idx + 1) % n
+	_draw_custom_ghost(Vector2(500.0, 340.0), 36.0, prev)
+	_draw_custom_ghost(Vector2(780.0, 340.0), 36.0, nxt)
+	var c := Vector2(640.0, 340.0)
+	draw_arc(c, 88.0, t * 0.8, t * 0.8 + PI * 1.4, 40, Color(0.43, 0.90, 1.0, 0.35), 4.0, true)
+	draw_arc(c, 100.0, -t * 0.6, -t * 0.6 + PI * 1.0, 40, Color(1.0, 0.77, 0.30, 0.30), 3.0, true)
+	draw_circle(c, 64.0, Color(0.0, 0.0, 0.0, 0.45))
+	var face := _skin_face_tex(ball_idx)
+	if face != null:
+		draw_texture_rect(face, Rect2(c - Vector2(64.0, 64.0), Vector2(128.0, 128.0)), false)
+	else:
+		draw_circle(c, 64.0, _skin_col(ball_idx))
+	draw_circle(c + Vector2(-22.0, -26.0), 20.0, Color(1.0, 1.0, 1.0, 0.70))
+	draw_circle(c + Vector2(18.0, 26.0), 7.0, Color(1.0, 1.0, 1.0, 0.45))
+	draw_arc(c, 64.0, 0.0, TAU, 48, Color(1.0, 1.0, 1.0, 0.9), 4.0, true)
+	_text_center_at(Vector2(640.0, 432.0), _skin_name(ball_idx), 24, WHITE, bold_font)
+	_text_center_at(Vector2(640.0, 454.0), str(ball_idx + 1) + " / " + str(n), 14, DIM)
+	_custom_arrow(CUSTOM_ARROW_L, "<", mp)
+	_custom_arrow(CUSTOM_ARROW_R, ">", mp)
+
+
+func _draw_custom_ghost(c: Vector2, r: float, idx: int) -> void:
+	draw_circle(c, r, Color(0.0, 0.0, 0.0, 0.40))
+	var face := _skin_face_tex(idx)
+	if face != null:
+		draw_texture_rect(face, Rect2(c - Vector2(r, r), Vector2(r, r) * 2.0), false, Color(1.0, 1.0, 1.0, 0.45))
+	else:
+		var col: Color = _skin_col(idx)
+		draw_circle(c, r, Color(col.r, col.g, col.b, 0.45))
+	draw_arc(c, r, 0.0, TAU, 32, Color(1.0, 1.0, 1.0, 0.40), 2.0, true)
+
+
+func _custom_arrow(r: Rect2, label: String, mp: Vector2) -> void:
+	var hov := r.has_point(mp)
+	draw_rect(r, Color(0.10, 0.22, 0.38, 0.90) if hov else Color(0.05, 0.13, 0.22, 0.90))
+	draw_rect(r, CYAN if hov else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
+	_text_center_at(r.get_center() + Vector2(0.0, 9.0), label, 26, WHITE if hov else DIM, bold_font)
 
 
 func _draw_settings() -> void:
@@ -5042,16 +5149,19 @@ func _draw_settings() -> void:
 	draw_rect(panel, Color(0.40, 0.72, 1.0, 0.35), false, 2.0)
 	_text_center_at(Vector2(640.0, 196.0), "SETTINGS", 34, WHITE, bold_font)
 	var mp := get_viewport().get_mouse_position()
-	var r := _settings_row_rect()
-	var hov := r.has_point(mp)
-	r.position.x += (1.0 - _ui_ease_at(0.05)) * 50.0
-	draw_rect(r, Color(0.10, 0.22, 0.38, 0.60) if hov else Color(0.06, 0.13, 0.24, 0.60))
-	if hov:
-		draw_rect(Rect2(r.position, Vector2(6.0, r.size.y)), WHITE)
-	draw_rect(r, Color(0.42, 0.66, 1.0, 0.35) if hov else Color(0.42, 0.66, 1.0, 0.18), false, 1.0)
-	_text("MOBILE CONTROLS", Vector2(r.position.x + 24.0, r.position.y + 32.0), 20, WHITE if hov else DIM)
-	_text_right("<  " + ("ON" if mobile_controls else "OFF") + "  >", Vector2(r.end.x - 24.0, r.position.y + 32.0), 20, CYAN if mobile_controls else DIM)
-	_text_center_at(Vector2(640.0, 340.0), "shows a fixed shooting joystick in versus", 14, DIM)
+	for i in SETTINGS_LABELS.size():
+		var r := _settings_row_rect(i)
+		var hov := r.has_point(mp)
+		# Rows glide in from the right in list order on every arrival.
+		r.position.x += (1.0 - _ui_ease_at(0.05 + float(i) * 0.05)) * 50.0
+		draw_rect(r, Color(0.10, 0.22, 0.38, 0.60) if hov else Color(0.06, 0.13, 0.24, 0.60))
+		if hov:
+			draw_rect(Rect2(r.position, Vector2(6.0, r.size.y)), WHITE)
+		draw_rect(r, Color(0.42, 0.66, 1.0, 0.35) if hov else Color(0.42, 0.66, 1.0, 0.18), false, 1.0)
+		_text(str(SETTINGS_LABELS[i]), Vector2(r.position.x + 24.0, r.position.y + 32.0), 20, WHITE if hov else DIM)
+		var val := "ON" if _settings_on(i) else "OFF"
+		_text_right("<  " + val + "  >", Vector2(r.end.x - 24.0, r.position.y + 32.0), 20, CYAN if _settings_on(i) else DIM)
+	_text_center_at(Vector2(640.0, 552.0), "mobile controls shows a fixed shooting joystick in versus", 14, DIM)
 	var hov_b := BTN_BACK.has_point(mp)
 	draw_rect(BTN_BACK, Color(0.10, 0.22, 0.30, 0.90) if hov_b else Color(0.05, 0.14, 0.20, 0.90))
 	draw_rect(BTN_BACK, CYAN if hov_b else Color(0.42, 0.66, 1.0, 0.55), false, 1.5)
@@ -5249,20 +5359,26 @@ func _draw_title() -> void:
 	# It drifts up into place and breathes gently once settled.
 	var le := _ui_ease_at(0.0)
 	var ly := (1.0 - le) * -26.0 + sin(t * 1.6) * 3.0
-	var bw := bold_font.get_string_size("BOUNCE  ", HORIZONTAL_ALIGNMENT_LEFT, -1, 68).x
-	_text("BOUNCE  BACK", Vector2(114.0, 160.0 + ly), 68, Color(0.25, 0.80, 1.0, 0.30 * le), true)
-	_text("BOUNCE  ", Vector2(110.0, 156.0 + ly), 68, Color(1.0, 1.0, 1.0, le), true)
-	_text("BACK", Vector2(110.0 + bw, 156.0 + ly), 68, Color(1.0, 0.77, 0.30, le), true)
-	var hov := TITLE_PLAY.has_point(mp) or TITLE_MULTI.has_point(mp) or TITLE_CUSTOM.has_point(mp) or TITLE_SETTINGS.has_point(mp) or TITLE_QUIT.has_point(mp)
-	_title_button(TITLE_PLAY, "PLAY", mp, not hov)
-	_title_button(TITLE_MULTI, "MULTIPLAYER", mp, false)
-	_title_button(TITLE_CUSTOM, "CUSTOMIZE", mp, false)
-	_title_button(TITLE_SETTINGS, "SETTINGS", mp, false)
-	_title_button(TITLE_QUIT, "QUIT", mp, false)
-	# The default PLAY slot breathes until the cursor picks a lane.
-	if not hov:
+	var bw := bold_font.get_string_size("BALLS ", HORIZONTAL_ALIGNMENT_LEFT, -1, 68).x
+	_text("BALLS OF DUTY", Vector2(114.0, 160.0 + ly), 68, Color(0.25, 0.80, 1.0, 0.30 * le), true)
+	_text("BALLS ", Vector2(110.0, 156.0 + ly), 68, Color(1.0, 1.0, 1.0, le), true)
+	_text("OF DUTY", Vector2(110.0 + bw, 156.0 + ly), 68, Color(1.0, 0.77, 0.30, le), true)
+	var btns := [TITLE_PLAY, TITLE_MULTI, TITLE_CUSTOM, TITLE_SETTINGS, TITLE_QUIT]
+	var labels := ["PLAY", "MULTIPLAYER", "CUSTOMIZE", "SETTINGS", "QUIT"]
+	var hov_idx := -1
+	for i in btns.size():
+		if (btns[i] as Rect2).has_point(mp):
+			hov_idx = i
+	if hov_idx >= 0:
+		title_last = hov_idx
+	var sel := hov_idx if hov_idx >= 0 else title_last
+	for i in btns.size():
+		_title_button(btns[i], labels[i], mp, sel == i)
+	# The last-touched slot keeps breathing until the cursor picks a lane.
+	if hov_idx < 0:
 		var pulse := 0.5 + 0.5 * sin(t * 3.0)
-		draw_rect(TITLE_PLAY.grow(2.0 + pulse * 2.0), Color(0.25, 0.80, 1.0, 0.18 + 0.22 * pulse), false, 2.0)
+		var sr: Rect2 = btns[clampi(title_last, 0, btns.size() - 1)]
+		draw_rect(sr.grow(2.0 + pulse * 2.0), Color(0.25, 0.80, 1.0, 0.18 + 0.22 * pulse), false, 2.0)
 	_draw_title_bar()
 	_menu_fade()
 

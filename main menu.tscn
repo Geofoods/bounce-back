@@ -313,7 +313,7 @@ theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.45)
 theme_override_constants/shadow_offset_x = 4
 theme_override_constants/shadow_offset_y = 6
 theme_override_font_sizes/font_size = 88
-text = "BOUNCE"
+text = "BALLS"
 
 [node name="TitleB" type="Label" parent="Center/Layout/TitleRow"]
 layout_mode = 2
@@ -322,7 +322,7 @@ theme_override_colors/font_shadow_color = Color(0.15, 0.08, 0, 0.45)
 theme_override_constants/shadow_offset_x = 4
 theme_override_constants/shadow_offset_y = 6
 theme_override_font_sizes/font_size = 88
-text = "BACK"
+text = "OF DUTY"
 
 [node name="Subtitle" type="Label" parent="Center/Layout"]
 layout_mode = 2

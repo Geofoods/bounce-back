@@ -1,4 +1,4 @@
-# Bounce Back
+# Balls of Duty
 
 A scrolling arcade game built for the "bounce back" jam theme. You are a
 bouncy ball. Hold to charge, release to launch yourself toward the cursor, and

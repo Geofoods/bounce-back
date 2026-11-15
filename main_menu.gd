@@ -1,6 +1,6 @@
 extends Control
 
-## Main menu for Bounce Back.
+## Main menu for Balls of Duty.
 ## Play looks for res://game.tscn so the menu can be wired up before the game
 ## scene exists.
 
