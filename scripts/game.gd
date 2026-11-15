@@ -225,6 +225,7 @@ var net_status := ""
 var net_count := 0.0
 var net_send_t := 0.0
 var net_timeout := 0.0
+var net_last_snap := 0.0  # t of the last duel snapshot seen/sent; stale = link trouble
 var foe_score := 0
 var foe_kills := 0
 var join_ip := "127.0.0.1"
@@ -262,6 +263,7 @@ var duel_chest_t := 0.0
 var duel_chest_max := 6
 var duel_pickups: Array = []
 var duel_snap_t := 0.0
+var duel_snap_balls := true  # balls ride every 2nd snapshot: full 20 Hz sim, 10 Hz ball list
 var duel_refill_t := 0.0
 var duel_over := false
 var duel_winner := -1  # winning fighter index, or -1 for draw/undecided
@@ -659,6 +661,8 @@ func _net_leave() -> void:
 @rpc("authority", "call_remote", "reliable")
 func _net_begin(roster: Array = []) -> void:
 	net_count = 3.0
+	net_last_snap = t
+	_net_toughen()
 	foe_score = 0
 	foe_kills = 0
 	net_send_t = 0.0
@@ -846,6 +850,7 @@ func _duel_fire(target: Vector2) -> void:
 func _net_duel(state: Array) -> void:
 	if net_mode != "client" or mode != "play":
 		return
+	net_last_snap = t
 	var fighters: Array = state[0]
 	for i in range(mini(fighters.size(), duel_ids.size())):
 		var fd: Array = fighters[i]
@@ -889,6 +894,8 @@ func _net_duel(state: Array) -> void:
 	duel_pickups = state[3]
 	time_left = state[4]
 	var flat: Array = state[5]
+	if flat.is_empty():
+		return
 	targets.clear()
 	for i in range(0, flat.size(), 4):
 		if i + 3 >= flat.size():
@@ -934,6 +941,7 @@ func _duel_end(winner: int) -> void:
 func _on_net_peer_connected(id: int) -> void:
 	if net_mode == "host" and (net_screen == "host" or net_screen == "ready"):
 		net_screen = "ready"
+	_net_toughen()
 
 
 func _on_net_connected_to_server() -> void:
@@ -941,6 +949,37 @@ func _on_net_connected_to_server() -> void:
 		net_screen = "ready"
 		net_status = ""
 		net_timeout = 0.0
+		_net_toughen()
+
+
+## Give ENet room to ride out WiFi hiccups before calling a peer dead:
+## same 32-strike limit, but 15s before the backoff gives up (was 5s) and a
+## 60s hard cap on any unacked reliable packet (was 30s). Re-applying to an
+## already-toughened peer is harmless, so both connect and match start call it.
+func _net_toughen() -> void:
+	var mp := multiplayer.multiplayer_peer as ENetMultiplayerPeer
+	if mp == null:
+		return
+	var host: ENetConnection = mp.get_host()
+	if host == null:
+		return
+	for p in host.get_peers():
+		if p is ENetPacketPeer and (p as ENetPacketPeer).is_active():
+			(p as ENetPacketPeer).set_timeout(32, 15000, 60000)
+
+
+## Round-trip ms to the first ENet peer, or -1 when there is no live link.
+func _net_rtt_ms() -> int:
+	var mp := multiplayer.multiplayer_peer as ENetMultiplayerPeer
+	if mp == null:
+		return -1
+	var host: ENetConnection = mp.get_host()
+	if host == null:
+		return -1
+	for p in host.get_peers():
+		if p is ENetPacketPeer and (p as ENetPacketPeer).is_active():
+			return int((p as ENetPacketPeer).get_statistic(ENetPacketPeer.PEER_ROUND_TRIP_TIME))
+	return -1
 
 
 func _on_net_connection_failed() -> void:
@@ -953,7 +992,7 @@ func _on_net_connection_failed() -> void:
 func _on_net_server_disconnected() -> void:
 	if net_mode == "client":
 		_net_leave()
-		_banner("FOE LEFT")
+		_banner("HOST DISCONNECTED")
 
 
 func _on_net_peer_disconnected(id: int) -> void:
@@ -1813,12 +1852,18 @@ func _update_duel(delta: float) -> void:
 			for f in allf:
 				var ff3: Dictionary = f
 				fighters.append([ff3["pos"], ff3["vel"], ff3["hp"], ff3["gun"], ff3["ready"]])
+			# Balls dominate the payload and barely move, so they ride every
+			# 2nd snapshot (~10 Hz); fighters, bullets and chests stay 20 Hz.
+			# An empty list means "no change", never "arena is empty".
+			duel_snap_balls = not duel_snap_balls
 			var tg_flat: Array = []
-			for tg in targets:
-				tg_flat.append(tg.pos.x)
-				tg_flat.append(tg.pos.y)
-				tg_flat.append(tg.radius)
-				tg_flat.append(2 if tg.kind == "armored" else (1 if tg.kind == "drifter" else 0))
+			if duel_snap_balls:
+				for tg in targets:
+					tg_flat.append(tg.pos.x)
+					tg_flat.append(tg.pos.y)
+					tg_flat.append(tg.radius)
+					tg_flat.append(2 if tg.kind == "armored" else (1 if tg.kind == "drifter" else 0))
+			net_last_snap = t
 			_net_duel.rpc([fighters, duel_bullets, duel_chests, duel_pickups, time_left, tg_flat])
 	else:
 		if int(duel_me.get("hp", 0)) > 0:
@@ -3399,6 +3444,15 @@ func _draw_hud() -> void:
 		_text_center_at(Vector2(640.0, 60.0), "COMBO x%d" % combo, 12, GOLD)
 	if autoaim:
 		_text_center_at(Vector2(640.0, 100.0), "AUTOAIM %d" % auto_left, 16, GOLD, bold_font)
+
+	# Link health, duel only: a stale snapshot means the other end stopped
+	# arriving (WiFi dying), not a silent freeze. RTT shown when known.
+	if mode == "play" and not duel_over and net_mode == "client" and t - net_last_snap > 2.0:
+		var _rtt := _net_rtt_ms()
+		var _msg := "CONNECTION UNSTABLE - holding last snapshot"
+		if _rtt >= 0:
+			_msg += " (%dms)" % _rtt
+		_text_center_at(Vector2(640.0, 62.0), _msg, 13, RED)
 
 	if mode == "play" and time_left < 5.0:
 		var a := (1.0 - time_left / 5.0) * (0.16 + 0.10 * sin(t * 10.0))

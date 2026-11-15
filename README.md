@@ -49,7 +49,13 @@ touches burn)
 to copy it for the rival (each address shows its adapter, best first -
 skip VPN/virtual ones). Both PCs must be on the same network, and the host
 must allow the game through the Windows firewall (UDP port 7777).
-If joining hangs, it fails after ~12s.
+If joining hangs, it fails after ~12s. Mid-match the netcode favors staying
+in: snapshots are small (fighters 20 Hz, balls 10 Hz) and ENet waits out
+long WiFi hiccups before dropping anyone. If your link does degrade, the
+client shows CONNECTION UNSTABLE with the current ping instead of freezing
+silently; a real drop says HOST DISCONNECTED. If drops keep happening:
+use the same WiFi band on both PCs, move closer to the router, or test over
+a phone hotspot to rule out the router.
 
 ## How it plays
 
