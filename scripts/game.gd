@@ -114,6 +114,7 @@ class Target:
 	var radius: float
 	var kind: String
 	var req: float
+	var tame := false   # duel balls never home in; only arena balls hunt
 	var color: Color
 	var phase: float = 0.0
 	var flash: float = 0.0
@@ -202,6 +203,12 @@ var shot_ready: bool = true       # only one launch per ball hit
 var ready_nudge_t: float = 0.0
 var mouse_pos: Vector2 = Vector2.ZERO
 var mouse_seen: bool = false
+var touch_aim_id := -1   # finger holding the charge; -1 when no touch aims
+var stick_id := -1        # second finger driving the gun stick; -1 = stowed
+var stick_on := false
+var stick_base := Vector2.ZERO   # screen-space anchor + knob of the gun stick
+var stick_knob := Vector2.ZERO
+const STICK_R := 70.0     # gun-stick travel in screen px
 
 # customization (persisted to user://bounce_back.cfg)
 var ball_idx := 0
@@ -227,7 +234,12 @@ const DUEL_HP := 100
 const DUEL_GUN_NAMES := ["FISTS", "PISTOL", "SPREAD"]
 const DUEL_SNAP_T := 1.0 / 20.0
 const DUEL_CHEST_HP := 25
-const DUEL_BALLS := 26           # smashable balls scattered around the duel arena
+const DUEL_CHEST_RESPAWN_T := 5.0   # host drops a fresh crate this often
+const DUEL_BALLS := 78           # smashable balls scattered around the duel arena
+const DUEL_SPIKE_REQ := 700.0    # fighter speed needed to smash a spiky ball
+const DUEL_SPIKE_DMG := 10       # damage for a slow touch on spikes
+const DUEL_LAVA_DMG := 15        # burn tick for resting on the molten floor
+const DUEL_LAVA_GRACE := 1.0      # seconds between lava burn ticks
 const DUEL_MAX_PLAYERS := 4      # host + up to 3 joiners in one shared arena
 const DUEL_FOE_COLS := [Color(1.0, 0.55, 0.25), Color(0.75, 0.55, 1.0), Color(0.45, 1.0, 0.55)]
 var duel_me := {}
@@ -240,6 +252,8 @@ var duel_my_id: int = 0         # my fighter index into duel_ids order
 var duel_was_alive := true      # tracks my death so elimination banners once
 var duel_bullets: Array = []
 var duel_chests: Array = []
+var duel_chest_t := 0.0
+var duel_chest_max := 6
 var duel_pickups: Array = []
 var duel_snap_t := 0.0
 var duel_refill_t := 0.0
@@ -630,7 +644,7 @@ func _duel_role() -> int:
 
 
 func _duel_fighter(pos: Vector2) -> Dictionary:
-	return {"pos": pos, "vel": Vector2.ZERO, "hp": DUEL_HP, "gun": 0, "cd": 0.0, "slam": 0.0, "ready": true, "gone": false}
+	return {"pos": pos, "vel": Vector2.ZERO, "hp": DUEL_HP, "gun": 0, "cd": 0.0, "slam": 0.0, "ready": true, "gone": false, "spike": 0.0, "lava": 0.0}
 
 
 ## Roster order decides everything: index 0 is the host, the rest are client
@@ -660,9 +674,13 @@ func _duel_reset(roster: Array = []) -> void:
 	duel_bullets.clear()
 	duel_pickups.clear()
 	duel_chests.clear()
+	stick_on = false
+	stick_id = -1
 	var offs := [Vector2(-260.0, -160.0), Vector2(260.0, -160.0), Vector2(-260.0, 160.0), Vector2(260.0, 160.0), Vector2(0.0, -340.0), Vector2(0.0, 340.0)]
 	for k in (4 if n <= 2 else 6):
 		duel_chests.append({"pos": c + offs[k], "hp": DUEL_CHEST_HP})
+	duel_chest_max = (4 if n <= 2 else 6) + 2
+	duel_chest_t = DUEL_CHEST_RESPAWN_T
 	duel_snap_t = 0.0
 	duel_over = false
 	duel_winner = -1
@@ -788,7 +806,17 @@ func _net_duel(state: Array) -> void:
 		var tg := Target.new()
 		tg.pos = Vector2(float(flat[i]), float(flat[i + 1]))
 		tg.radius = float(flat[i + 2])
-		if int(flat[i + 3]) == 1:
+		tg.tame = true
+		# Snapshot balls already exist on the host: full fade-in and a free
+		# pulse phase, or every ball would sit near-invisible (age 0).
+		tg.age = 1.0
+		tg.phase = randf() * TAU
+		var dk := int(flat[i + 3])
+		if dk == 2:
+			tg.kind = "armored"
+			tg.color = GOLD
+			tg.req = DUEL_SPIKE_REQ
+		elif dk == 1:
 			tg.kind = "drifter"
 			tg.color = GREEN
 		else:
@@ -895,12 +923,53 @@ func _net_key(code: int) -> void:
 
 
 # ------------------------------------------------------------------ input
+## Mobile: finger 1 holds/drags to charge and aim, lifting fires — exactly
+## like the left mouse button. A second finger anchors a gun stick (versus
+## only): push it to aim, hold it to keep shooting. While any touch drives
+## the game, emulated mouse events are ignored so nothing jumps/double-fires.
+func _touch_pos(ev_position: Vector2) -> Vector2:
+	return _screen_to_world(ev_position)
+
+
 func _unhandled_input(event: InputEvent) -> void:
+	var st := event as InputEventScreenTouch
+	if st:
+		mouse_seen = true
+		if st.pressed:
+			if touch_aim_id == -1:
+				touch_aim_id = st.index
+				mouse_pos = _touch_pos(st.position)
+				if mode == "play":
+					_begin_charge()
+			elif not stick_on and mode == "play" and net_mode != "off" and not duel_over:
+				stick_on = true
+				stick_id = st.index
+				stick_base = st.position
+				stick_knob = st.position
+		else:
+			if st.index == touch_aim_id:
+				touch_aim_id = -1
+				if mode == "play":
+					_fire()
+			elif st.index == stick_id:
+				stick_on = false
+				stick_id = -1
+		return
+	var dr := event as InputEventScreenDrag
+	if dr:
+		if dr.index == touch_aim_id:
+			mouse_pos = _touch_pos(dr.position)
+			mouse_seen = true
+		elif dr.index == stick_id and stick_on:
+			stick_knob = dr.position
+		return
 	if event is InputEventMouseMotion:
 		mouse_seen = true
 		return
 
 	var mb := event as InputEventMouseButton
+	if (touch_aim_id >= 0 or stick_on) and (mb and (mb.button_index == MOUSE_BUTTON_LEFT or mb.button_index == MOUSE_BUTTON_RIGHT)):
+		return
 	if mb and mb.button_index == MOUSE_BUTTON_RIGHT:
 		if mb.pressed and mode == "play" and net_mode != "off":
 			_duel_try_fire(mouse_pos)
@@ -1457,7 +1526,8 @@ func _physics_process(delta: float) -> void:
 	_update_ambient(delta)
 	_update_post_fx(delta)
 	_update_camera(delta)
-	mouse_pos = _screen_to_world(get_viewport().get_mouse_position())
+	if touch_aim_id < 0 and not stick_on:
+		mouse_pos = _screen_to_world(get_viewport().get_mouse_position())
 	queue_redraw()
 
 
@@ -1573,7 +1643,7 @@ func _update_play(delta: float) -> void:
 # ------------------------------------------------------------------ duel
 ## Shared-arena versus shooter: both fighters in one world, host simulates,
 ## client commands launches/shots and predicts its own fighter. 100 HP each,
-## chests drop PISTOL then SPREAD, KO (or more HP at 0s) wins.
+## breaking a chest instantly equips PISTOL then SPREAD; KO (or more HP at 0s) wins.
 func _update_duel(delta: float) -> void:
 	ball_pos = duel_me["pos"]
 	ball_vel = duel_me["vel"]
@@ -1587,6 +1657,14 @@ func _update_duel(delta: float) -> void:
 		var ff: Dictionary = f
 		ff["cd"] = maxf(0.0, float(ff["cd"]) - delta)
 		ff["slam"] = maxf(0.0, float(ff["slam"]) - delta)
+		ff["spike"] = maxf(0.0, float(ff["spike"]) - delta)
+		ff["lava"] = maxf(0.0, float(ff["lava"]) - delta)
+	# Held gun stick keeps firing toward its deflection; the gun cooldown
+	# inside _duel_try_fire sets the rate on both host and client.
+	if stick_on and int(duel_me.get("hp", 0)) > 0:
+		var sdir := _stick_dir()
+		if sdir.length() > 0.3:
+			_duel_try_fire((duel_me["pos"] as Vector2) + sdir * 200.0)
 	if net_mode == "host":
 		for f in allf:
 			var ff2: Dictionary = f
@@ -1602,6 +1680,14 @@ func _update_duel(delta: float) -> void:
 		_duel_smash_check()
 		_duel_update_bullets(wdt, true)
 		_duel_update_pickups(true)
+		duel_chest_t -= delta
+		if duel_chest_t <= 0.0:
+			duel_chest_t = DUEL_CHEST_RESPAWN_T
+			if duel_chests.size() < duel_chest_max:
+				var cp := _duel_chest_spot()
+				if cp != Vector2.INF:
+					duel_chests.append({"pos": cp, "hp": DUEL_CHEST_HP})
+					_ring(cp, GOLD, 10, 200.0)
 		if duel_was_alive and int(duel_me.get("hp", 0)) <= 0:
 			duel_was_alive = false
 			_banner("ELIMINATED")
@@ -1629,7 +1715,7 @@ func _update_duel(delta: float) -> void:
 				tg_flat.append(tg.pos.x)
 				tg_flat.append(tg.pos.y)
 				tg_flat.append(tg.radius)
-				tg_flat.append(1 if tg.kind == "drifter" else 0)
+				tg_flat.append(2 if tg.kind == "armored" else (1 if tg.kind == "drifter" else 0))
 			_net_duel.rpc([fighters, duel_bullets, duel_chests, duel_pickups, time_left, tg_flat])
 	else:
 		if int(duel_me.get("hp", 0)) > 0:
@@ -1666,7 +1752,6 @@ func _duel_step(f: Dictionary, dt: float, authoritative: bool) -> void:
 	var min_x := WORLD.position.x + BALL_R
 	var max_x := WORLD.end.x - BALL_R
 	var min_y := WORLD.position.y + BALL_R
-	var max_y := WORLD.end.y - BALL_R
 	if p.x < min_x:
 		p.x = min_x
 		if v.x < 0.0:
@@ -1679,10 +1764,23 @@ func _duel_step(f: Dictionary, dt: float, authoritative: bool) -> void:
 		p.y = min_y
 		if v.y < 0.0:
 			v.y = -v.y * WALL_REST
-	elif p.y > max_y:
-		p.y = max_y
+	# Molten floor: resting on it burns instead of killing outright. The
+	# fighter floats on the surface and takes a damage tick per grace
+	# window; host owns the hp call and snapshots deliver it.
+	var surface := _lava_top() - BALL_R
+	if p.y > surface and int(f.get("hp", 0)) > 0:
+		p.x = clampf(p.x, min_x, max_x)
+		p.y = surface
 		if v.y > 0.0:
 			v.y = -v.y * WALL_REST
+		if float(f.get("lava", 0.0)) <= 0.0:
+			f["lava"] = DUEL_LAVA_GRACE
+			if authoritative:
+				_duel_hurt(f, DUEL_LAVA_DMG)
+				_popup(p + Vector2(0.0, -30.0), "-%d LAVA" % DUEL_LAVA_DMG, RED, 20)
+			_burst(p, RED, 10, 300.0)
+			_burst(p, GOLD, 8, 240.0)
+			_sfx("armor", 0.0, -8.0)
 	# Chest bounce (host also chips the chest on hard hits).
 	for i in duel_chests.size():
 		var ch: Dictionary = duel_chests[i]
@@ -1695,7 +1793,7 @@ func _duel_step(f: Dictionary, dt: float, authoritative: bool) -> void:
 			if vn < 0.0:
 				v -= 1.9 * vn * n
 				if authoritative and -vn > 380.0:
-					_duel_damage_chest(i, 25, int(f["gun"]))
+					_duel_damage_chest(i, 25, f)
 					_sfx("bump", 0.10, -14.0)
 					break
 	f["pos"] = p
@@ -1750,12 +1848,14 @@ func _duel_update_bullets(dt: float, authoritative: bool) -> void:
 	for b in duel_bullets:
 		var bp: Vector2 = b["pos"] + (b["vel"] as Vector2) * dt
 		var life: float = float(b["life"]) - dt
-		var dead := life <= 0.0 or bp.x < WORLD.position.x or bp.x > WORLD.end.x or bp.y < WORLD.position.y or bp.y > WORLD.end.y
+		var dead := life <= 0.0 or bp.x < WORLD.position.x or bp.x > WORLD.end.x or bp.y < WORLD.position.y or bp.y > _lava_top()
 		if not dead and authoritative:
 			for i in duel_chests.size():
 				var ch: Dictionary = duel_chests[i]
 				if bp.distance_to(ch["pos"]) < 34.0:
-					_duel_damage_chest(i, int(b["dmg"]), -1)
+					var oi := int(b["owner"])
+					var bf: Dictionary = allf[oi] if oi >= 0 and oi < allf.size() else {}
+					_duel_damage_chest(i, int(b["dmg"]), bf)
 					dead = true
 					break
 		if not dead and authoritative:
@@ -1800,7 +1900,10 @@ func _duel_update_pickups(authoritative: bool) -> void:
 	duel_pickups = keep
 
 
-func _duel_damage_chest(i: int, dmg: int, breaker_gun: int) -> void:
+## Breaking a chest equips its gun on the spot: PISTOL first, then SPREAD
+## once armed. No walk-over needed; a pickup only drops when the breaker is
+## already out (a stray bullet finishing the job after they died).
+func _duel_damage_chest(i: int, dmg: int, breaker: Dictionary) -> void:
 	if i < 0 or i >= duel_chests.size():
 		return
 	var ch: Dictionary = duel_chests[i]
@@ -1808,10 +1911,14 @@ func _duel_damage_chest(i: int, dmg: int, breaker_gun: int) -> void:
 	if int(ch["hp"]) > 0:
 		return
 	duel_chests.remove_at(i)
-	var kind := 1
-	if breaker_gun > 0:
-		kind = 2
-	duel_pickups.append({"pos": ch["pos"], "kind": kind})
+	if not breaker.is_empty() and int(breaker.get("hp", 0)) > 0:
+		var kind := 2 if int(breaker.get("gun", 0)) > 0 else 1
+		breaker["gun"] = kind
+		breaker["cd"] = 0.0
+		_popup((breaker["pos"] as Vector2) + Vector2(0.0, -34.0), DUEL_GUN_NAMES[clampi(kind, 0, 2)], CYAN, 16)
+		_sfx("wave", 0.0, -10.0)
+	else:
+		duel_pickups.append({"pos": ch["pos"], "kind": 1})
 	_burst(ch["pos"], GOLD, 14, 260.0)
 	_ring(ch["pos"], GOLD, 12, 240.0)
 	_sfx("bump", 0.0, -6.0)
@@ -1821,7 +1928,8 @@ func _duel_hurt(f: Dictionary, dmg: int) -> void:
 	f["hp"] = maxi(0, int(f["hp"]) - dmg)
 
 
-## Duel balls: plain pink + green drifters only (no homing, no pickups).
+## Duel balls: pink basics, green drifters and gold spikies (no pickups).
+## Spikies need a fast hit to smash; slow touches burn. Tame: never homing.
 ## Both sides scatter some instantly; the host truth wins via snapshots.
 func _duel_populate() -> void:
 	targets.clear()
@@ -1831,7 +1939,8 @@ func _duel_populate() -> void:
 
 
 func _duel_spawn_one() -> void:
-	var kind := "drifter" if randf() < 0.3 else "basic"
+	var roll := randf()
+	var kind := "armored" if roll < 0.20 else ("drifter" if roll < 0.45 else "basic")
 	var r := _radius_for(kind)
 	var pos := _duel_free_spot(r)
 	if pos == Vector2.INF:
@@ -1840,12 +1949,16 @@ func _duel_spawn_one() -> void:
 	tg.kind = kind
 	tg.radius = r
 	tg.pos = pos
+	tg.tame = true
 	tg.phase = randf() * TAU
 	tg.spin = randf() * TAU
 	if kind == "drifter":
 		tg.req = KILL_SPEED * 1.15
 		tg.color = GREEN
 		tg.vel = Vector2.RIGHT.rotated(randf() * TAU) * randf_range(45.0, 105.0)
+	elif kind == "armored":
+		tg.req = DUEL_SPIKE_REQ
+		tg.color = GOLD
 	else:
 		tg.req = KILL_SPEED
 		tg.color = PINK
@@ -1858,6 +1971,8 @@ func _duel_free_spot(r: float) -> Vector2:
 		var pt := Vector2(
 			randf_range(WORLD.position.x + pad, WORLD.end.x - pad),
 			randf_range(WORLD.position.y + pad, WORLD.end.y - pad))
+		if pt.y > _lava_top() - r:
+			continue
 		var crowded := false
 		for f in _duel_all():
 			if pt.distance_to((f as Dictionary).get("pos", WORLD.get_center())) < 220.0 + r:
@@ -1880,7 +1995,34 @@ func _duel_free_spot(r: float) -> Vector2:
 	return Vector2.INF
 
 
-## Host only: any living fighter touching a ball smashes it for +6 HP.
+## Random free arena point for a respawned crate, clear of fighters,
+## crates and the world edge so it never drops onto someone's head.
+func _duel_chest_spot() -> Vector2:
+	var pad := 160.0
+	for i in 40:
+		var pt := Vector2(
+			randf_range(WORLD.position.x + pad, WORLD.end.x - pad),
+			randf_range(WORLD.position.y + pad, WORLD.end.y - pad))
+		if pt.y > _lava_top() - 60.0:
+			continue
+		var ok := true
+		for f in _duel_all():
+			if pt.distance_to((f as Dictionary).get("pos", WORLD.get_center())) < 300.0:
+				ok = false
+				break
+		if ok:
+			for ch in duel_chests:
+				if pt.distance_to(ch["pos"]) < 220.0:
+					ok = false
+					break
+		if ok:
+			return pt
+	return Vector2.INF
+
+
+## Host only: any living fighter touching a ball smashes it, reloading launch.
+## Spiky gold balls need a fast hit; a slow touch burns for DUEL_SPIKE_DMG
+## with a second of grace so resting contact can't melt a fighter.
 func _duel_smash_check() -> void:
 	for f in _duel_all():
 		if int((f as Dictionary).get("hp", 0)) <= 0 or bool((f as Dictionary).get("gone", false)):
@@ -1895,6 +2037,7 @@ func _duel_smash_check() -> void:
 			var n := d.normalized() if d.length_squared() > 0.0001 else Vector2.RIGHT
 			f["pos"] = tg.pos + n * rr
 			var v: Vector2 = f["vel"]
+			var spd := v.length()
 			var vn := v.dot(n)
 			if vn < 0.0:
 				v -= 1.8 * vn * n
@@ -1902,10 +2045,18 @@ func _duel_smash_check() -> void:
 			if v.length() > MAX_SPEED:
 				v = v.normalized() * MAX_SPEED
 			f["vel"] = v
+			if tg.kind == "armored" and spd < float(tg.req):
+				if float(f.get("spike", 0.0)) <= 0.0:
+					f["spike"] = 1.0
+					_duel_hurt(f, DUEL_SPIKE_DMG)
+					_popup(tg.pos + Vector2(0.0, -30.0), "-%d SPIKES" % DUEL_SPIKE_DMG, RED, 20)
+					_shards(tg.pos, v, RED, 8, 470.0, 0.5)
+					_sfx("armor", 0.0, -8.0)
+				fp = f["pos"]
+				continue
 			targets.remove_at(i)
-			f["hp"] = mini(DUEL_HP, int(f["hp"]) + 6)
 			f["ready"] = true
-			_popup(tg.pos + Vector2(0.0, -30.0), "+6 HP", GREEN, 20)
+			_popup(tg.pos + Vector2(0.0, -30.0), "SMASH", GREEN, 20)
 			_shards(tg.pos, v, tg.color, 8, 470.0, 0.5)
 			_sfx("wave", 0.0, -8.0)
 			fp = f["pos"]
@@ -1960,12 +2111,22 @@ func _duel_spawn_shots(f: Dictionary, target: Vector2, owner: int = -1) -> void:
 	base = base.normalized()
 	if gun == 1:
 		f["cd"] = 0.35
-		duel_bullets.append({"pos": f["pos"] + base * (BALL_R + 8.0), "vel": base * 950.0, "owner": owner, "life": 1.6, "dmg": 12})
+		duel_bullets.append({"pos": f["pos"] + base * (BALL_R + 8.0), "vel": base * 1900.0, "owner": owner, "life": 1.6, "dmg": 12})
 	else:
 		f["cd"] = 0.6
 		for a in [-0.14, 0.0, 0.14]:
-			duel_bullets.append({"pos": f["pos"] + base * (BALL_R + 8.0), "vel": base.rotated(a) * 850.0, "owner": owner, "life": 1.6, "dmg": 7})
+			duel_bullets.append({"pos": f["pos"] + base * (BALL_R + 8.0), "vel": base.rotated(a) * 1700.0, "owner": owner, "life": 1.6, "dmg": 7})
 	_sfx("shoot_low", 0.0, -8.0)
+
+
+## Gun-stick deflection in screen space, dead-zoned and clamped to unit.
+func _stick_dir() -> Vector2:
+	if not stick_on:
+		return Vector2.ZERO
+	var d := (stick_knob - stick_base) / STICK_R
+	if d.length() < 0.25:
+		return Vector2.ZERO
+	return d.limit_length(1.0)
 
 
 ## Local trigger: muzzle flash + host spawn or client command.
@@ -2007,7 +2168,7 @@ func _update_targets(dt: float) -> void:
 		tg.flash = maxf(0.0, tg.flash - dt * 5.0)
 		tg.slow_cd = maxf(0.0, tg.slow_cd - dt)
 
-		if tg.kind == "chaser" or tg.kind == "armored":
+		if (tg.kind == "chaser" or tg.kind == "armored") and not tg.tame:
 			# Spiked balls lumber after the ball as well, heavier than chasers.
 			var follow: float = chase_speed * (0.60 if tg.kind == "armored" else 1.0)
 			var dir: Vector2 = ball_pos - tg.pos
@@ -2365,9 +2526,8 @@ func _collide_targets() -> void:
 
 
 ## The ball touched the molten floor — sizzle out and end the run.
+## Grace never protects from lava: only a stacked shield tanks one hit.
 func _lava_death() -> void:
-	if hurt_cd > 0.0:
-		return
 	if _try_shield():
 		return
 	died_in_lava = true
@@ -2597,6 +2757,9 @@ func _draw() -> void:
 		_draw_hud()
 		if mode == "play":
 			_draw_minimap()
+			if net_mode != "off" and not duel_over:
+				_draw_duel_arrows()
+				_draw_stick()
 			if boss != null:
 				_draw_boss_bar()
 	if mode == "title":
@@ -2696,8 +2859,6 @@ func _draw_arena() -> void:
 
 ## Animated molten band along the bottom of the world.
 func _draw_lava() -> void:
-	if net_mode != "off" and (mode == "play" or (mode == "over" and duel_over)):
-		return  # duel arena has a solid floor, no lava
 	var top := _lava_top()
 	var vis := _view_rect().grow(CULL_MARGIN)
 	if vis.end.y < top or vis.position.y > WORLD.end.y:
@@ -3103,7 +3264,10 @@ func _draw_hud() -> void:
 		_text_right("SMASHED", Vector2(1232.0, 28.0), 11, DIM)
 		_text_right(str(kills), Vector2(1232.0, 56.0), 26, WHITE, true)
 	if mode == "play" and net_mode != "off" and not duel_over:
-		_text_center_at(Vector2(640.0, 700.0), "RMB / F shoot   ·   chests give guns   ·   smash balls to bounce again", 12, Color(0.45, 0.60, 0.80, 0.55))
+		var hint := "RMB / F shoot   ·   chests give guns   ·   smash balls to bounce again"
+		if DisplayServer.is_touchscreen_available():
+			hint = "hold + drag to bounce   ·   2nd finger: push stick to shoot"
+		_text_center_at(Vector2(640.0, 700.0), hint, 12, Color(0.45, 0.60, 0.80, 0.55))
 
 	var bw := 420.0
 	var bx := 640.0 - bw * 0.5
@@ -3203,6 +3367,57 @@ func _draw_duel_world() -> void:
 				Color(minf(col.r + 0.2, 1.0), minf(col.g + 0.1, 1.0), col.b, 0.9))
 
 
+## Edge arrows pointing at living rivals who are off-screen. Screen space:
+## project each rival through the camera, clamp the ray to a margin box and
+## draw their color-coded triangle + name so you always know where they are.
+func _draw_duel_arrows() -> void:
+	var margin := 46.0
+	var box := Rect2(margin, margin, VIEW.x - margin * 2.0, VIEW.y - margin * 2.0)
+	var center := VIEW * 0.5
+	# Same rect as _draw_minimap: arrows slide left past it instead of
+	# piling onto the radar, while keeping their exact bearing.
+	var rr := Rect2(VIEW.x - 26.0 - 200.0, VIEW.y - 26.0 - 133.0, 200.0, 133.0).grow(30.0)
+	for o in duel_foes.size():
+		var f: Dictionary = duel_foes[o]
+		if int(f.get("hp", 0)) <= 0:
+			continue
+		var sp := ((f.get("pos", Vector2.ZERO) as Vector2) - cam) * cam_zoom + center
+		if box.has_point(sp):
+			continue
+		var dir := sp - center
+		if dir.length_squared() < 1.0:
+			dir = Vector2.RIGHT
+		dir = dir.normalized()
+		var sx := (box.end.x - center.x) / dir.x if dir.x > 0.0 else ((box.position.x - center.x) / dir.x if dir.x < 0.0 else INF)
+		var sy := (box.end.y - center.y) / dir.y if dir.y > 0.0 else ((box.position.y - center.y) / dir.y if dir.y < 0.0 else INF)
+		var edge := center + dir * minf(sx, sy)
+		if rr.has_point(edge):
+			edge.x = maxf(rr.position.x - 18.0, box.position.x)
+		var col: Color = _duel_foe_col(o)
+		var pulse := 0.70 + 0.30 * sin(t * 5.0 + float(o) * 1.7)
+		var tip := edge + dir * 14.0
+		var back := edge - dir * 6.0
+		var side := dir.orthogonal() * 10.0
+		draw_colored_polygon(PackedVector2Array([tip, back + side, back - side]),
+			Color(col.r, col.g, col.b, pulse))
+		_text_center_at(edge - dir * 22.0, _duel_foe_name(o), 12,
+			Color(minf(col.r + 0.2, 1.0), minf(col.g + 0.1, 1.0), col.b, 0.95))
+
+
+## Gun stick (touch versus): base ring where the second finger landed, knob
+## following the drag. Drawn in screen space, only while held.
+func _draw_stick() -> void:
+	if not stick_on:
+		return
+	var pulse := 0.55 + 0.15 * sin(t * 4.0)
+	draw_arc(stick_base, STICK_R, 0.0, TAU, 40, Color(1.0, 0.80, 0.30, 0.15 + 0.35 * pulse), 3.0, true)
+	draw_circle(stick_base, 6.0, Color(1.0, 0.80, 0.30, 0.5))
+	var k := stick_base + (stick_knob - stick_base).limit_length(STICK_R)
+	draw_line(stick_base, k, Color(1.0, 0.85, 0.45, 0.4), 4.0, true)
+	draw_circle(k, 22.0, Color(0.10, 0.16, 0.24, 0.55))
+	draw_arc(k, 22.0, 0.0, TAU, 28, Color(1.0, 0.85, 0.45, 0.8), 3.0, true)
+
+
 ## Corner map so you can see the balls waiting beyond the screen edge.
 func _draw_minimap() -> void:
 	var size := Vector2(200.0, 133.0)
@@ -3220,9 +3435,8 @@ func _draw_minimap() -> void:
 		var tp0: Vector2 = mm.position + (tg.pos - WORLD.position) * sc
 		draw_rect(Rect2(tp0 - Vector2(1.8, 1.8), Vector2(3.6, 3.6)),
 			Color(tg.color.r, tg.color.g, tg.color.b, 0.85))
-	if net_mode == "off":
-		draw_rect(Rect2(mm.position.x, mm.position.y + (_lava_top() - WORLD.position.y) * sc.y,
-			mm.size.x, LAVA_H * sc.y), Color(1.0, 0.45, 0.10, 0.55))
+	draw_rect(Rect2(mm.position.x, mm.position.y + (_lava_top() - WORLD.position.y) * sc.y,
+		mm.size.x, LAVA_H * sc.y), Color(1.0, 0.45, 0.10, 0.55))
 
 	var vw := _view_rect()
 	var vr := Rect2(mm.position + (vw.position - WORLD.position) * sc, vw.size * sc)

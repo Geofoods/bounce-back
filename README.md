@@ -25,6 +25,8 @@ godot --path .
 | Release | Fire toward the cursor; hold longer = more power |
 | Space | Same as mouse, for keyboard play |
 | Right mouse / F | Shoot equipped gun toward cursor (versus duel) |
+| Touch: 1 finger | Same as left mouse — hold to charge, release to fire |
+| Touch: gun stick | 2nd finger plants a stick — push to aim, hold to shoot |
 | R | Restart (rematch in versus) |
 | B | Back to menu (versus game-over) |
 | M | Mute |
@@ -33,12 +35,14 @@ godot --path .
 ## Multiplayer versus
 
 Title → MULTIPLAYER: one player HOSTs, the other JOINs with the host's IP
-(port 7777, or `IP:port` for a custom port). Versus is a duel in a sharedarena: every fighter has 100 HP, slams into chests to break them, grabs
-PISTOL then SPREAD pickups, and shoots the rivals (RMB or F toward the
-cursor). Up to 4 players (host + 3) share one arena — knock everyone
+(port 7777, or `IP:port` for a custom port). Versus is a duel in a sharedarena: every fighter has 100 HP. Breaking a chest instantly equips
+PISTOL, then SPREAD once armed — no pickup walk-over. Fresh crates drop
+into the arena every few seconds.The molten floor burns fighters that touch it (15 damage per second). Shoot the rivals (RMB or F toward the cursor). Up to 4 players (host + 3) share one arena — knock everyone
 else out, or hold the most HP when the 60s clock runs out, to win.
-Knocked-out fighters spectate while the rest finish. Pink/green balls
-also spawn — smashing one heals +6 HP and reloads your launch
+Knocked-out fighters spectate while the rest finish. Edge arrows point
+at off-screen rivals. Pink/green balls also spawn — smashing one
+reloads your launch (gold spiky balls need a fast hit — slow
+touches burn)
 (one bounce per ball smashed). If joining hangs, it fails after ~12s: use an address from the host's
 list that shares your LAN, and allow the game through the Windows firewall
 (UDP port 7777).
