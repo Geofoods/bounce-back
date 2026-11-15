@@ -889,7 +889,32 @@ func _net_duel(state: Array) -> void:
 		charge_t = 0.0
 		stick_on = false
 		_banner("ELIMINATED")
-	duel_bullets = state[1]
+	# Bullets fly ~1900 px/s, so adopting the 20 Hz snapshot raw would
+	# teleport them ~95 px per snap on the joiner's screen. Match each
+	# incoming bullet to the one already gliding locally (same owner +
+	# velocity; both sides extrapolate with it) and correct only halfway:
+	# steady-state drift is ~zero, so the lerp eats network jitter instead
+	# of flashing it. Newly spawned bullets have no match and land exact.
+	var fresh: Array = state[1]
+	var smooth: Array = []
+	var used: Array = []
+	for nb in fresh:
+		var nd: Dictionary = nb
+		var found := -1
+		for oi in duel_bullets.size():
+			if used.has(oi):
+				continue
+			var ob: Dictionary = duel_bullets[oi]
+			if int(ob.get("owner", -9)) == int(nd.get("owner", -9)) and (ob["vel"] as Vector2).distance_squared_to(nd["vel"] as Vector2) < 1.0:
+				found = oi
+				break
+		if found >= 0:
+			used.append(found)
+			var ob2: Dictionary = duel_bullets[found]
+			smooth.append({"pos": (ob2["pos"] as Vector2).lerp(nd["pos"], 0.5), "vel": nd["vel"], "owner": nd["owner"], "life": nd["life"], "dmg": nd["dmg"]})
+		else:
+			smooth.append(nd)
+	duel_bullets = smooth
 	duel_chests = state[2]
 	duel_pickups = state[3]
 	time_left = state[4]
