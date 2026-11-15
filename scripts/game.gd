@@ -359,6 +359,7 @@ var bumpers: Array = []
 var targets: Array = []
 var particles: Array = []
 var popups: Array = []
+var shadow_queue: Array = []   # cast requests deferred past the lamp wash
 var mote_t: float = 0.0
 var charge_mote_t: float = 0.0
 var ember_t: float = 0.0
@@ -4363,6 +4364,7 @@ func _draw() -> void:
 	draw_org = -cam * cam_zoom + VIEW * 0.5 + off
 	draw_set_transform(draw_org, 0.0, z)
 
+	shadow_queue.clear()
 	_draw_world_floor()
 	_draw_grid()
 	_draw_arena()
@@ -4379,6 +4381,7 @@ func _draw() -> void:
 	if net_mode != "off" and (mode == "play" or (mode == "over" and duel_over)):
 		_draw_duel_world()
 	_draw_lamp_wash()
+	_draw_queued_shadows()
 	_draw_popups()
 	_draw_reticle()
 
@@ -4590,25 +4593,45 @@ func _light_level(pos: Vector2) -> float:
 ## falls off with distance; past LIGHT_RADIUS bodies sit in darkness and
 ## are dimmed instead of skipped, so shading never disappears.
 func _cast_shadow(pos: Vector2, r: float, fade: float = 1.0) -> void:
+	# Records only; _draw_queued_shadows() inks them after the lamp wash,
+	# which would otherwise paint straight over every blob and erase them.
 	var d := pos - _light_pos()
 	var dist := d.length()
 	if dist < 1.0:
 		return
 	var dir := d / dist if dist > 0.001 else Vector2.RIGHT
-	if dist > LIGHT_RADIUS:
-		# Beyond the lamp: settle into ambient darkness, no highlight.
-		var lvl := _light_level(pos)
-		draw_circle(pos, r * 1.02, Color(0.0, 0.0, 0.0, (1.0 - lvl) * 0.62 * fade))
-		return
-	var strength := pow(1.0 - dist / LIGHT_RADIUS, 0.65) * fade
-	if strength <= 0.02:
-		# Still leave a faint contact shade so far bodies keep depth.
-		draw_circle(pos, r * 1.0, Color(0.0, 0.0, 0.0, 0.18 * fade))
-		return
-	# Soft offset blob on the far side + tight contact shade underneath.
-	draw_circle(pos + dir * (r * 0.42 + 6.0), r * 1.02, Color(0.0, 0.0, 0.0, 0.55 * strength))
-	draw_circle(pos + dir * (r * 0.30 + 3.0), r * 0.96, Color(0.0, 0.0, 0.0, 0.30 * strength))
-	draw_circle(pos - dir * r * 0.52, r * 0.42, Color(1.0, 0.95, 0.85, 0.34 * strength))
+	shadow_queue.append({"pos": pos, "r": r, "dir": dir, "dist": dist, "fade": fade})
+
+
+## Cartoon stand-in for real 2D lights, inked after the lamp wash so the
+## lit floor sits under the shadow instead of bleaching it out: a blob on
+## the side away from your ball plus a warm kiss of light on the facing
+## side, with a faint cool rim so the shape reads on the near-black floor.
+func _draw_queued_shadows() -> void:
+	for q in shadow_queue:
+		var pos: Vector2 = q["pos"]
+		var r: float = q["r"]
+		var dir: Vector2 = q["dir"]
+		var dist: float = q["dist"]
+		var fade: float = q["fade"]
+		if dist > LIGHT_RADIUS:
+			# Beyond the lamp: settle into ambient darkness, no highlight.
+			var lvl := _light_level(pos)
+			draw_circle(pos, r * 1.02, Color(0.0, 0.0, 0.0, (1.0 - lvl) * 0.62 * fade))
+			continue
+		var strength := pow(1.0 - dist / LIGHT_RADIUS, 0.65) * fade
+		if strength <= 0.02:
+			# Still leave a faint contact shade so far bodies keep depth.
+			draw_circle(pos, r * 1.0, Color(0.0, 0.0, 0.0, 0.18 * fade))
+			continue
+		# Blob pushed well clear of the body so a crescent survives from
+		# under it; the lamp-side overlap reads as edge shading, which is
+		# exactly what a cast shadow does when it climbs its caster.
+		var bc := pos + dir * (r * 1.10 + 12.0)
+		draw_circle(bc, r * 1.05, Color(0.0, 0.0, 0.0, 0.70 * strength))
+		draw_circle(pos + dir * (r * 0.30 + 3.0), r * 0.96, Color(0.0, 0.0, 0.0, 0.30 * strength))
+		draw_arc(bc, r * 1.05, dir.angle() - 1.4, dir.angle() + 1.4, 28, Color(0.60, 0.78, 1.0, 0.30 * strength), 2.5, true)
+		draw_circle(pos - dir * r * 0.52, r * 0.42, Color(1.0, 0.95, 0.85, 0.34 * strength))
 
 
 ## Warm pool of light spilled by the lamp onto the floor around it. Drawn
@@ -5162,17 +5185,26 @@ func _draw_duel_world() -> void:
 		var bc: Color = CYAN if int(b["owner"]) == _duel_role() else Color(1.0, 0.55, 0.30)
 		var bk := int(b.get("kind", 0))
 		var bp2: Vector2 = b["pos"]
+		var glow := Color(bc.r, bc.g, bc.b, 0.20)
+		var glow_soft := Color(bc.r, bc.g, bc.b, 0.10)
 		if bk == 1:
 			var bd: Vector2 = (b["vel"] as Vector2).normalized()
+			draw_line(bp2 - bd * 28.0, bp2 + bd * 14.0, glow_soft, 18.0, true)
 			draw_line(bp2 - bd * 26.0, bp2 + bd * 12.0, Color(bc.r, bc.g, bc.b, 0.5), 10.0, true)
 			draw_line(bp2 - bd * 26.0, bp2 + bd * 12.0, Color(1.0, 1.0, 1.0, 0.9), 4.0, true)
+			draw_circle(bp2 + bd * 12.0, 8.0, glow)
+			draw_circle(bp2 + bd * 12.0, 3.5, Color(1.0, 1.0, 1.0, 0.95))
 		elif bk == 2:
+			draw_circle(bp2, DUEL_BULLET_R + 18.0, glow_soft)
 			draw_circle(bp2, DUEL_BULLET_R + 10.0, Color(bc.r, bc.g, bc.b, 0.30))
 			draw_circle(bp2, DUEL_BULLET_R + 4.0, Color(1.0, 1.0, 1.0, 0.95))
 			draw_circle(bp2, DUEL_BULLET_R, bc)
+			draw_circle(bp2, DUEL_BULLET_R * 0.45, Color(1.0, 1.0, 1.0, 0.95))
 		else:
+			draw_circle(bp2, DUEL_BULLET_R + 14.0, glow_soft)
 			draw_circle(bp2, DUEL_BULLET_R + 6.0, Color(bc.r, bc.g, bc.b, 0.25))
 			draw_circle(bp2, DUEL_BULLET_R, bc)
+			draw_circle(bp2, DUEL_BULLET_R * 0.5, Color(1.0, 1.0, 1.0, 0.9))
 	# Rival fighters in their own colors, skipped once eliminated.
 	for o in duel_foes.size():
 		var f: Dictionary = duel_foes[o]
